@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>$(DEVELOPMENT_LANGUAGE)</string>
+    <key>CFBundleDisplayName</key><string>FlowGet</string>
+    <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key><string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+    <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>FLOWGET_IOS_CLIENT_ID</key><string>flowget-ios-client-not-registered</string>
+    <key>CFBundleURLTypes</key>
+    <array><dict><key>CFBundleURLName</key><string>com.flowget.ios</string><key>CFBundleURLSchemes</key><array><string>flowget</string></array></dict></array>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>BGTaskSchedulerPermittedIdentifiers</key><array><string>com.flowget.ios.scheduled-downloads</string></array>
+    <key>NSLocalNetworkUsageDescription</key><string>FlowGet finds compatible devices on your local network for direct file transfers.</string>
+    <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+    <key>UIBackgroundModes</key><array><string>fetch</string><string>processing</string></array>
+    <key>UIAppFonts</key><array><string>ProductSans-Regular.ttf</string><string>ProductSans-Bold.ttf</string><string>ProductSans-Italic.ttf</string></array>
+    <key>UILaunchScreen</key><dict><key>UIColorName</key><string>FlowBackground</string></dict>
+    <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+</dict>
+</plist>
