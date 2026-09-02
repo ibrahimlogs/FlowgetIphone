@@ -38,7 +38,7 @@ struct BrowserHomeView: View {
                         if store.browserHistory.isEmpty {
                             linkRow(BrowserLink(title: "FlowGet", url: AppConfig.authBaseURL))
                         } else {
-                            ForEach(Array(store.browserHistory.prefix(5)).enumerated(), id: \.element.id) { index, link in
+                            ForEach(Array(Array(store.browserHistory.prefix(5)).enumerated()), id: \.element.id) { index, link in
                                 linkRow(link)
                                 if index < min(4, store.browserHistory.count - 1) { Divider().padding(.leading, 68) }
                             }
