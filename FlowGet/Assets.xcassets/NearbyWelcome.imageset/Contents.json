@@ -1,0 +1,7 @@
+{
+  "images" : [
+    { "filename" : "nearby-welcome-light.png", "idiom" : "universal", "scale" : "1x" },
+    { "appearances" : [{ "appearance" : "luminosity", "value" : "dark" }], "filename" : "nearby-welcome-dark.png", "idiom" : "universal", "scale" : "1x" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}

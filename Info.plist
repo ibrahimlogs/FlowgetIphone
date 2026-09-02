@@ -20,7 +20,7 @@
     <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
     <key>UIBackgroundModes</key><array><string>fetch</string><string>processing</string></array>
     <key>UIAppFonts</key><array><string>ProductSans-Regular.ttf</string><string>ProductSans-Bold.ttf</string><string>ProductSans-Italic.ttf</string></array>
-    <key>UILaunchScreen</key><dict><key>UIColorName</key><string>FlowBackground</string></dict>
+    <key>UILaunchScreen</key><dict><key>UIColorName</key><string>FlowBackground</string><key>UIImageName</key><string>FlowGetMark</string><key>UIImageRespectsSafeAreaInsets</key><true/></dict>
     <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 </dict>
