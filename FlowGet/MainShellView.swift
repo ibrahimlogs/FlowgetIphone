@@ -207,7 +207,7 @@ struct DrawerView: View {
                     FlowGetLogo(size: 44)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("FlowGet").font(.flowTitle)
-                        Text(store.account == nil ? "License not synced" : "Free mode")
+                        Text(store.account == nil ? "License not synced" : store.license.title)
                             .font(.flowLabel)
                             .foregroundStyle(FlowPalette.secondary)
                     }

@@ -197,24 +197,28 @@ struct LicenseView: View {
                         HStack(spacing: 12) {
                             Image(systemName: "checkmark.seal").font(.system(size: 30, weight: .medium))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("License not synced").font(.flowTitleLarge)
+                                Text(store.license.title).font(.flowTitleLarge)
                                 Text(store.account?.email ?? "Signed out").font(.flowCaption).opacity(0.72)
                             }
-                            Spacer(); FlowStatusBadge(title: "Free", color: FlowPalette.onAction)
+                            Spacer(); FlowStatusBadge(title: store.license.badge, color: FlowPalette.onAction)
                         }
-                        Text("FlowGet will verify Mobile access when the native iOS licensing contract is available.").font(.flowBodySmall).opacity(0.78)
+                        Text(store.license.summary).font(.flowBodySmall).opacity(0.78)
                     }
                     .foregroundStyle(FlowPalette.onAction).padding(22).background(FlowPalette.action).clipShape(RoundedRectangle(cornerRadius: 24))
 
                     FlowSectionTitle(title: "License details")
                     FlowCard(content: VStack(spacing: 0) {
-                        info("Plan", "No active paid plan", "checkmark.seal")
+                        info("Plan", store.license.plan, "checkmark.seal")
                         Divider().padding(.leading, 70)
-                        info("Device", "This iPhone", "iphone")
+                        info("Device", store.license.device, "iphone")
                         Divider().padding(.leading, 70)
-                        info("Access expiry", "Not applicable", "calendar")
+                        info("Access expiry", store.license.expiry, "calendar")
                     }, elevated: true)
-                    FlowOutlineButton(title: "Refresh licensing", icon: "arrow.clockwise") {}
+                    FlowOutlineButton(
+                        title: store.isRefreshingLicense ? "Refreshing…" : "Refresh licensing",
+                        icon: "arrow.clockwise"
+                    ) { Task { await store.refreshLicensing() } }
+                    .disabled(store.isRefreshingLicense || store.session != .authenticated)
                 }.padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 28)
             }.scrollIndicators(.hidden)
         }.flowPage()

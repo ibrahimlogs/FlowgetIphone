@@ -103,9 +103,30 @@ struct LoginView: View {
                         .foregroundStyle(FlowPalette.outline)
                         .padding(.vertical, 10)
 
-                        FlowOutlineButton(title: "Create account", icon: "person.badge.plus") {
-                            openURL(AppConfig.authBaseURL)
+                        Button {
+                            focusedField = nil
+                            Task { await store.loginWithGoogle() }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Text("G")
+                                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                                    .frame(width: 24, height: 24)
+                                    .background(FlowPalette.surface)
+                                    .clipShape(Circle())
+                                Text("Continue with Google").font(.flowTitle)
+                            }
+                            .foregroundStyle(FlowPalette.content)
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                            .background(FlowPalette.surface)
+                            .clipShape(RoundedRectangle(cornerRadius: FlowRadius.medium, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: FlowRadius.medium).stroke(FlowPalette.outline))
                         }
+                        .buttonStyle(FlowPressButtonStyle())
+                        .disabled(store.isAuthenticating)
+
+                        Button("New to FlowGet? Create account") { openURL(AppConfig.authBaseURL) }
+                            .font(.flowBodySmall.weight(.medium))
+                            .foregroundStyle(FlowPalette.secondary)
                     }
                     .padding(.top, 24)
 

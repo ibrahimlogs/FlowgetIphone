@@ -5,7 +5,7 @@ import UIKit
 
 @MainActor
 final class AppStore: ObservableObject {
-    enum Session { case restoring, signedOut, authenticated }
+    enum Session: Equatable { case restoring, signedOut, authenticated }
     @Published var session: Session = .restoring
     @Published var account: FlowGetAccount?
     @Published var settings: AppSettings {
@@ -29,9 +29,14 @@ final class AppStore: ObservableObject {
     @Published var incomingURL: URL?
     @Published var loginError: String?
     @Published var isAuthenticating = false
+    @Published var license = LicenseSnapshot.notSynced
+    @Published var isRefreshingLicense = false
     let downloads = DownloadManager()
     private let auth = AuthService()
+    private lazy var licensingService = LicensingService(auth: auth)
+    private let googleSignIn = GoogleSignInService()
     private var tokens: AuthTokens?
+    private var licenseHeartbeatTask: Task<Void, Never>?
 
     init() {
         settings = Persistence.load(AppSettings.self, name: "settings.json", fallback: AppSettings())
@@ -54,6 +59,7 @@ final class AppStore: ObservableObject {
         }
         if stored.tokens.expiresAt > Date().addingTimeInterval(30) {
             tokens = stored.tokens; account = stored.account; session = .authenticated
+            Task { await refreshLicensing() }
         } else {
             Task { await refreshSession(stored) }
         }
@@ -65,11 +71,27 @@ final class AppStore: ObservableObject {
         defer { isAuthenticating = false }
         do {
             let result = try await auth.login(email: email, password: password, deviceLabel: UIDevice.current.name)
-            account = result.account; tokens = result.tokens
-            KeychainStore.save(StoredSession(account: result.account, tokens: result.tokens), account: "primary")
-            session = .authenticated
-            activity.insert(ActivityItem(title: "Signed in", detail: result.account.email, kind: .system), at: 0)
+            accept(result)
+            await refreshLicensing()
         } catch { loginError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription }
+    }
+
+    func loginWithGoogle() async {
+        guard !isAuthenticating else { return }
+        isAuthenticating = true; loginError = nil
+        defer { isAuthenticating = false }
+        do {
+            let credential = try await googleSignIn.signIn()
+            let result = try await auth.google(
+                idToken: credential.idToken,
+                nonce: credential.nonce,
+                deviceLabel: UIDevice.current.name
+            )
+            accept(result)
+            await refreshLicensing()
+        } catch {
+            loginError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     private func refreshSession(_ stored: StoredSession) async {
@@ -78,17 +100,56 @@ final class AppStore: ObservableObject {
             account = result.account; tokens = result.tokens
             KeychainStore.save(StoredSession(account: result.account, tokens: result.tokens), account: "primary")
             session = .authenticated
+            await refreshLicensing()
         } catch {
             KeychainStore.delete(account: "primary")
             tokens = nil; account = nil; session = .signedOut
+            license = .notSynced
         }
     }
 
     func logout() {
         let token = tokens?.accessToken
+        licenseHeartbeatTask?.cancel(); licenseHeartbeatTask = nil
         tokens = nil; account = nil; session = .signedOut
+        license = .notSynced
         KeychainStore.delete(account: "primary")
-        if let token { Task { await auth.revoke(token: token) } }
+        googleSignIn.signOut()
+        Task {
+            if let token {
+                await licensingService.close(accessToken: token)
+                await auth.revoke(token: token)
+            } else {
+                await licensingService.reset()
+            }
+        }
+    }
+
+    func refreshLicensing() async {
+        guard session == .authenticated, let account else {
+            license = .notSynced
+            return
+        }
+        guard !isRefreshingLicense else { return }
+        licenseHeartbeatTask?.cancel()
+        licenseHeartbeatTask = nil
+        isRefreshingLicense = true
+        license = .syncing
+        defer { isRefreshingLicense = false }
+        do {
+            let token = try await validAccessToken()
+            license = await licensingService.synchronize(
+                account: account,
+                accessToken: token,
+                deviceLabel: UIDevice.current.name
+            )
+            startLicenseHeartbeatIfNeeded()
+        } catch {
+            license = .unavailable(
+                (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
+                device: UIDevice.current.name
+            )
+        }
     }
 
     func addBrowserHistory(title: String, url: URL) {
@@ -103,8 +164,42 @@ final class AppStore: ObservableObject {
     }
 
     func handleIncomingURL(_ url: URL) {
+        if GoogleSignInService.handle(url) { return }
         if let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) { incomingURL = url }
         else if url.scheme == "flowget", let value = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "url" })?.value.flatMap(URL.init(string:)) { incomingURL = value }
+    }
+
+    private func accept(_ result: LoginResult) {
+        account = result.account
+        tokens = result.tokens
+        KeychainStore.save(StoredSession(account: result.account, tokens: result.tokens), account: "primary")
+        session = .authenticated
+        activity.insert(ActivityItem(title: "Signed in", detail: result.account.email, kind: .system), at: 0)
+    }
+
+    private func validAccessToken() async throws -> String {
+        guard let current = tokens else { throw AuthError.invalidResponse }
+        if current.expiresAt > Date().addingTimeInterval(30) { return current.accessToken }
+        let result = try await auth.refresh(refreshToken: current.refreshToken)
+        account = result.account
+        tokens = result.tokens
+        KeychainStore.save(StoredSession(account: result.account, tokens: result.tokens), account: "primary")
+        return result.tokens.accessToken
+    }
+
+    private func startLicenseHeartbeatIfNeeded() {
+        licenseHeartbeatTask?.cancel()
+        guard license.kind == .paid || license.kind == .trial else { return }
+        licenseHeartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
+                guard !Task.isCancelled, let self, self.session == .authenticated else { return }
+                guard let token = try? await self.validAccessToken() else { continue }
+                if let snapshot = await self.licensingService.heartbeat(accessToken: token) {
+                    self.license = snapshot
+                }
+            }
+        }
     }
 
     private struct StoredSession: Codable { let account: FlowGetAccount; let tokens: AuthTokens }

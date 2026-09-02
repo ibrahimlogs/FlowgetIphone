@@ -5,6 +5,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		F20000000000000000000001 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = F20000000000000000000003 /* GoogleSignIn */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		F10000000000000000000001 /* FlowGet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FlowGet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F10000000000000000000010 /* FlowGetTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FlowGetTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -20,7 +24,7 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		F10000000000000000000003 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		F10000000000000000000003 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (F20000000000000000000001 /* GoogleSignIn in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
 		F10000000000000000000012 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
@@ -42,7 +46,7 @@
 			dependencies = ();
 			fileSystemSynchronizedGroups = (F10000000000000000000002 /* FlowGet */,);
 			name = FlowGet;
-			packageProductDependencies = ();
+			packageProductDependencies = (F20000000000000000000003 /* GoogleSignIn */,);
 			productName = FlowGet;
 			productReference = F10000000000000000000001 /* FlowGet.app */;
 			productType = "com.apple.product-type.application";
@@ -73,6 +77,7 @@
 			mainGroup = F10000000000000000000004;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			packageReferences = (F20000000000000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,);
 			productRefGroup = F10000000000000000000005 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -108,6 +113,14 @@
 		F1000000000000000000000B /* Build configuration list for PBXProject "FlowGet" */ = {isa = XCConfigurationList; buildConfigurations = (F1000000000000000000000C /* Debug */, F1000000000000000000000D /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		F10000000000000000000016 /* Build configuration list for PBXNativeTarget "FlowGetTests" */ = {isa = XCConfigurationList; buildConfigurations = (F10000000000000000000017 /* Debug */, F10000000000000000000018 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F20000000000000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/google/GoogleSignIn-iOS"; requirement = {kind = upToNextMajorVersion; minimumVersion = 9.2.0; }; };
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F20000000000000000000003 /* GoogleSignIn */ = {isa = XCSwiftPackageProductDependency; package = F20000000000000000000002 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */; productName = GoogleSignIn; };
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = F1000000000000000000000A /* Project object */;
 }

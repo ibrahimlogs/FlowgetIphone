@@ -183,6 +183,10 @@ struct BrowserHomeView: View {
     }
 }
 
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
 private enum BrowserCollection: String, Identifiable {
     case history = "History", saved = "Bookmarks", files = "Files", tabs = "Tabs"
     var id: String { rawValue }
@@ -249,6 +253,8 @@ struct BrowserPage: View {
     @State private var canForward = false
     @State private var webView: WKWebView
     @State private var showAdd = false
+    @State private var downloadCandidates: [URL] = []
+    @State private var showDownloadCandidates = false
 
     init(initialURL: URL, settings: AppSettings) {
         self.initialURL = initialURL
@@ -283,12 +289,14 @@ struct BrowserPage: View {
                          aggressiveBlocking: settings.aggressiveBlocking,
                          popupBlocking: settings.popupBlocking,
                          currentURL: $currentURL, title: $title, progress: $progress,
-                         canBack: $canBack, canForward: $canForward)
+                         canBack: $canBack, canForward: $canForward) { request, suggestedName in
+                store.downloads.add(request: request, title: suggestedName)
+            }
             HStack {
                 browserAction("chevron.left", "Back", enabled: canBack) { webView.goBack() }
                 Spacer(); browserAction("chevron.right", "Forward", enabled: canForward) { webView.goForward() }
                 Spacer(); browserAction("arrow.clockwise", "Reload") { webView.reload() }
-                Spacer(); browserAction("arrow.down.circle", "Download") { showAdd = true }
+                Spacer(); browserAction("arrow.down.circle", "Download") { discoverDownloads() }
                 Spacer(); browserAction(store.bookmarks.contains { $0.url == currentURL } ? "star.fill" : "star", "Bookmark") { store.toggleBookmark(title: title, url: currentURL) }
                 Spacer(); ShareLink(item: currentURL) { Image(systemName: "square.and.arrow.up").frame(width: 34, height: 42) }
             }
@@ -298,6 +306,13 @@ struct BrowserPage: View {
         .toolbar(.visible, for: .navigationBar)
         .onChange(of: currentURL) { _, value in address = value.absoluteString; store.addBrowserHistory(title: title, url: value) }
         .sheet(isPresented: $showAdd) { AddDownloadView(prefilledURL: currentURL).presentationDragIndicator(.visible) }
+        .confirmationDialog("Download from this page", isPresented: $showDownloadCandidates, titleVisibility: .visible) {
+            ForEach(downloadCandidates.prefix(10), id: \.self) { url in
+                Button(url.lastPathComponent.nonEmpty ?? url.host ?? "Download") { enqueue(url) }
+            }
+            Button("Enter URL manually") { showAdd = true }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private func browserAction(_ icon: String, _ label: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
@@ -308,6 +323,46 @@ struct BrowserPage: View {
         guard let url = URLInput.browserURL(from: address) else { return }
         currentURL = url
         webView.load(URLRequest(url: url))
+    }
+
+    private func discoverDownloads() {
+        let script = #"""
+        (() => {
+          const found = new Set();
+          const add = value => {
+            if (!value) return;
+            try {
+              const url = new URL(value, document.baseURI);
+              if (url.protocol === 'http:' || url.protocol === 'https:') found.add(url.href);
+            } catch (_) {}
+          };
+          document.querySelectorAll('a[download]').forEach(node => add(node.href));
+          document.querySelectorAll('video[src], audio[src], source[src]').forEach(node => add(node.src));
+          document.querySelectorAll('a[href]').forEach(node => {
+            if (/\.(zip|rar|7z|pdf|docx?|xlsx?|pptx?|apk|dmg|exe|mp3|m4a|wav|flac|mp4|m4v|mov|mkv|webm)(?:$|[?#])/i.test(node.href)) add(node.href);
+          });
+          return Array.from(found).slice(0, 25);
+        })();
+        """#
+        webView.evaluateJavaScript(script) { result, _ in
+            let urls = (result as? [String] ?? []).compactMap(URL.init(string:))
+            DispatchQueue.main.async {
+                downloadCandidates = Array(Set(urls)).sorted { $0.absoluteString < $1.absoluteString }
+                if downloadCandidates.count == 1, let only = downloadCandidates.first {
+                    enqueue(only)
+                } else if downloadCandidates.isEmpty {
+                    showAdd = true
+                } else {
+                    showDownloadCandidates = true
+                }
+            }
+        }
+    }
+
+    private func enqueue(_ url: URL) {
+        BrowserDownloadSupport.prepareRequest(for: url, in: webView) { request in
+            store.downloads.add(request: request, title: url.lastPathComponent.nonEmpty)
+        }
     }
 }
 
@@ -322,6 +377,7 @@ struct WebContainer: UIViewRepresentable {
     @Binding var progress: Double
     @Binding var canBack: Bool
     @Binding var canForward: Bool
+    let onDownload: (URLRequest, String?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> WKWebView {
@@ -365,13 +421,99 @@ struct WebContainer: UIViewRepresentable {
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let scheme = navigationAction.request.url?.scheme?.lowercased() else { decisionHandler(.cancel); return }
-            decisionHandler(["http", "https", "about"].contains(scheme) ? .allow : .cancel)
+            guard ["http", "https", "about"].contains(scheme) else { decisionHandler(.cancel); return }
+            if navigationAction.shouldPerformDownload,
+               navigationAction.request.httpMethod?.uppercased() == "GET",
+               let url = navigationAction.request.url {
+                capture(webView: webView, url: url, request: navigationAction.request, suggestedName: nil)
+                decisionHandler(.cancel)
+                return
+            }
+            let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
+            if isMainFrame,
+               let url = navigationAction.request.url,
+               BrowserDownloadSupport.isLikelyDownloadURL(url) {
+                capture(webView: webView, url: url, request: navigationAction.request, suggestedName: nil)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            guard let response = navigationResponse.response as? HTTPURLResponse,
+                  let url = response.url,
+                  BrowserDownloadSupport.shouldDownload(
+                    url: url,
+                    mimeType: response.mimeType,
+                    contentDisposition: response.value(forHTTPHeaderField: "Content-Disposition"),
+                    canShowMIMEType: navigationResponse.canShowMIMEType
+                  ) else {
+                decisionHandler(.allow)
+                return
+            }
+            capture(webView: webView, url: url, request: URLRequest(url: url), suggestedName: response.suggestedFilename)
+            decisionHandler(.cancel)
         }
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
             guard navigationAction.targetFrame == nil else { return nil }
             if !parent.popupBlocking { webView.load(navigationAction.request) }
             return nil
+        }
+
+        private func capture(webView: WKWebView, url: URL, request: URLRequest, suggestedName: String?) {
+            BrowserDownloadSupport.prepareRequest(for: url, in: webView, baseRequest: request) { [weak self] prepared in
+                self?.parent.onDownload(prepared, suggestedName)
+            }
+        }
+    }
+}
+
+enum BrowserDownloadSupport {
+    private static let downloadableExtensions: Set<String> = [
+        "zip", "rar", "7z", "tar", "gz", "bz2", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+        "apk", "dmg", "exe", "iso", "mp3", "m4a", "wav", "flac", "mp4", "m4v", "mov", "mkv", "webm"
+    ]
+
+    static func isLikelyDownloadURL(_ url: URL) -> Bool {
+        downloadableExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    static func shouldDownload(url: URL, mimeType: String?, contentDisposition: String?, canShowMIMEType: Bool) -> Bool {
+        if contentDisposition?.localizedCaseInsensitiveContains("attachment") == true { return true }
+        if !canShowMIMEType { return true }
+        if mimeType?.lowercased() == "application/octet-stream" { return true }
+        return isLikelyDownloadURL(url)
+    }
+
+    static func prepareRequest(
+        for url: URL,
+        in webView: WKWebView,
+        baseRequest: URLRequest? = nil,
+        completion: @escaping (URLRequest) -> Void
+    ) {
+        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+            webView.evaluateJavaScript("navigator.userAgent") { userAgent, _ in
+                var request = baseRequest ?? URLRequest(url: url)
+                request.url = url
+                request.httpMethod = "GET"
+                let eligible = cookies.filter { cookie in
+                    guard let host = url.host?.lowercased() else { return false }
+                    let domain = cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                    let domainMatches = host == domain || host.hasSuffix("." + domain)
+                    let pathMatches = url.path.isEmpty || url.path.hasPrefix(cookie.path)
+                    let secureMatches = !cookie.isSecure || url.scheme?.lowercased() == "https"
+                    return domainMatches && pathMatches && secureMatches
+                }
+                HTTPCookie.requestHeaderFields(with: eligible).forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                if let value = userAgent as? String, !value.isEmpty {
+                    request.setValue(value, forHTTPHeaderField: "User-Agent")
+                }
+                if request.value(forHTTPHeaderField: "Referer") == nil, let referrer = webView.url {
+                    request.setValue(referrer.absoluteString, forHTTPHeaderField: "Referer")
+                }
+                DispatchQueue.main.async { completion(request) }
+            }
         }
     }
 }

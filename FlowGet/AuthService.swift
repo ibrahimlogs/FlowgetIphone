@@ -1,7 +1,9 @@
 import Foundation
 
 enum AuthError: LocalizedError {
-    case invalidCredentials, unverified, suspended, rateLimited, invalidClient, server(String), invalidResponse
+    case invalidCredentials, unverified, suspended, rateLimited, invalidClient
+    case accountLinkRequired, accountRegistrationRequired
+    case server(String), invalidResponse
     var errorDescription: String? {
         switch self {
         case .invalidCredentials: "Email or password is incorrect."
@@ -9,6 +11,8 @@ enum AuthError: LocalizedError {
         case .suspended: "This account is not currently available."
         case .rateLimited: "Too many attempts. Please wait and try again."
         case .invalidClient: "The iPhone client must be enabled by the FlowGet server."
+        case .accountLinkRequired: "This email already has a FlowGet account. Sign in with your password and link Google from the website first."
+        case .accountRegistrationRequired: "Create your FlowGet account on the website before signing in with Google."
         case .server(let message): message
         case .invalidResponse: "FlowGet returned an unexpected response."
         }
@@ -40,6 +44,17 @@ actor AuthService {
     private struct RefreshRequest: Encodable {
         let refreshToken: String
         enum CodingKeys: String, CodingKey { case refreshToken = "refresh_token" }
+    }
+    private struct GoogleRequest: Encodable {
+        let clientID: String, idToken: String, nonce: String, platform: String, deviceLabel: String
+        enum CodingKeys: String, CodingKey {
+            case clientID = "client_id", idToken = "id_token", nonce, platform, deviceLabel = "device_label"
+        }
+    }
+    private struct WorkerAssertionEnvelope: Decodable {
+        struct Payload: Decodable { let assertion: String }
+        let ok: Bool
+        let data: Payload
     }
     private struct ErrorEnvelope: Decodable { struct Detail: Decodable { let code: String; let message: String }; let error: Detail }
     private let session: URLSession
@@ -77,6 +92,45 @@ actor AuthService {
         return try await tokenRequest(request)
     }
 
+    func google(idToken: String, nonce: String, deviceLabel: String) async throws -> LoginResult {
+        let url = AppConfig.authBaseURL.appendingPathComponent("api/v2/auth/google")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
+        request.httpBody = try JSONEncoder().encode(GoogleRequest(
+            clientID: AppConfig.clientID,
+            idToken: idToken,
+            nonce: nonce,
+            platform: "ios",
+            deviceLabel: deviceLabel
+        ))
+        return try await tokenRequest(request)
+    }
+
+    func workerAssertion(token: String) async throws -> String {
+        let url = AppConfig.authBaseURL.appendingPathComponent("api/v2/auth/worker-assertion")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let detail = try? JSONDecoder().decode(ErrorEnvelope.self, from: data).error
+            switch detail?.code {
+            case "RATE_LIMITED": throw AuthError.rateLimited
+            case "ACCOUNT_SUSPENDED", "ACCOUNT_INACTIVE", "SESSION_REVOKED": throw AuthError.suspended
+            default: throw AuthError.server(detail?.message ?? "Licensing authorization failed (HTTP \(http.statusCode)).")
+            }
+        }
+        let envelope = try JSONDecoder().decode(WorkerAssertionEnvelope.self, from: data)
+        guard envelope.ok, !envelope.data.assertion.isEmpty else { throw AuthError.invalidResponse }
+        return envelope.data.assertion
+    }
+
     private func tokenRequest(_ request: URLRequest) async throws -> LoginResult {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
@@ -88,6 +142,8 @@ actor AuthService {
             case "ACCOUNT_SUSPENDED", "ACCOUNT_INACTIVE": throw AuthError.suspended
             case "RATE_LIMITED": throw AuthError.rateLimited
             case "INVALID_NATIVE_CLIENT", "INVALID_PLATFORM": throw AuthError.invalidClient
+            case "ACCOUNT_LINK_REQUIRED": throw AuthError.accountLinkRequired
+            case "ACCOUNT_REGISTRATION_REQUIRED": throw AuthError.accountRegistrationRequired
             default: throw AuthError.server(detail?.message ?? "Sign in failed (HTTP \(http.statusCode)).")
             }
         }

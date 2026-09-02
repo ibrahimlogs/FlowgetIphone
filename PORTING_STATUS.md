@@ -3,12 +3,13 @@
 | Android area | iPhone implementation | Status |
 |---|---|---|
 | Compose design system | `DesignSystem.swift` + semantic color assets | Ported |
-| Login/session storage | `AuthService.swift`, Keychain-backed session | Ported; dedicated production iOS public client registered |
-| Downloads list/add/pause/delete/share | `DownloadsView.swift`, `DownloadManager.swift` | Ported for direct HTTP(S), with background URLSession persistence |
+| Login/session storage | `AuthService.swift`, official Google Sign-In SDK, Keychain-backed session | Ported; password and Google use the dedicated production iOS public client |
+| Licensing/device allocation | `LicensingService.swift`, Laravel worker assertions, Cloudflare Licensing V3 | Ported; iOS uses a Keychain-protected Ed25519 installation identity and the shared Mobile slot family |
+| Downloads list/add/pause/delete/share | `DownloadsView.swift`, `DownloadManager.swift` | Ported for direct HTTP(S), including browser cookies/headers held in memory and background URLSession persistence |
 | HLS/DASH muxing | URLSession source download | UI accepted; offline media muxing needs an AVFoundation-specific follow-up |
 | FTP | — | Not available through Apple's native URLSession stack |
 | Torrent engine | Native-core boundary in add-download UI | Requires an iOS XCFramework build of the authoritative native core |
-| Browser | `WKWebView` browser, history, saved links, download handoff | Ported |
+| Browser | `WKWebView` browser, history, saved links, response interception, download discovery/handoff | Ported for direct files; segmented HLS/DASH media still needs the native engine |
 | FlowShare screens | Send/receive/nearby, codes, file selection, transfer list | Ported UI; protocol-v3 QUIC requires the authoritative native core XCFramework |
 | Settings | Persistent download/browser/theme settings | Ported |
 | Activity, Schedule, License, About | `MoreViews.swift` | Ported |

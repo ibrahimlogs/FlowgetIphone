@@ -11,6 +11,7 @@ final class DownloadManager: NSObject, ObservableObject {
     private(set) var autoRetry = true
     private var taskByID: [UUID: URLSessionDownloadTask] = [:]
     private var idByTask: [Int: UUID] = [:]
+    private var requestByID: [UUID: URLRequest] = [:]
     private var progressSample: [UUID: (bytes: Int64, date: Date)] = [:]
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.background(withIdentifier: "com.flowget.ios.downloads")
@@ -29,10 +30,16 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func add(url: URL, title: String? = nil, wifiOnly: Bool = false, autoStart: Bool = true) {
+        add(request: URLRequest(url: url), title: title, wifiOnly: wifiOnly, autoStart: autoStart)
+    }
+
+    func add(request: URLRequest, title: String? = nil, wifiOnly: Bool = false, autoStart: Bool = true) {
+        guard let url = request.url else { return }
         var item = DownloadItem(title: title?.nonEmpty ?? url.lastPathComponent.nonEmpty ?? url.host ?? "Download", url: url)
         item.wifiOnly = wifiOnly
         item.autoStart = autoStart
         items.insert(item, at: 0)
+        requestByID[item.id] = request
         persist()
         onActivity?(ActivityItem(title: "Download added", detail: item.title, kind: .download))
         if autoStart { start(item.id) }
@@ -69,7 +76,7 @@ final class DownloadManager: NSObject, ObservableObject {
             task = session.downloadTask(withResumeData: resumeData)
             try? FileManager.default.removeItem(at: resumeURL)
         } else {
-            var request = URLRequest(url: item.url)
+            var request = requestByID[id] ?? URLRequest(url: item.url)
             request.allowsCellularAccess = allowsCellularAccess && !item.wifiOnly
             task = session.downloadTask(with: request)
         }
@@ -105,6 +112,7 @@ final class DownloadManager: NSObject, ObservableObject {
         taskByID[id] = nil
         idByTask = idByTask.filter { $0.value != id }
         progressSample[id] = nil
+        requestByID[id] = nil
         try? FileManager.default.removeItem(at: Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume"))
         persist()
     }
@@ -206,6 +214,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.items[index].status = .completed
                 self.items[index].completedAt = Date()
                 self.items[index].localFileName = uniqueName
+                self.requestByID[id] = nil
                 try? FileManager.default.removeItem(at: Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume"))
                 let diskSize = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize
                 self.items[index].downloadedBytes = self.items[index].totalBytes ?? diskSize.map(Int64.init) ?? 0
@@ -219,6 +228,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.items[index].status = .failed
                 self.items[index].errorMessage = error.localizedDescription
             }
+            self.requestByID[id] = nil
             self.persist()
             self.finishTask(id)
         }
@@ -247,6 +257,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             self.items[index].status = .failed
             self.items[index].speedBytesPerSecond = 0
             self.items[index].errorMessage = error.localizedDescription
+            self.requestByID[id] = nil
             self.persist()
             self.finishTask(id)
         }

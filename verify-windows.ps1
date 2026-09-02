@@ -35,6 +35,9 @@ $requiredFiles = @(
     'FlowGet\FlowGetApp.swift',
     'FlowGet\DownloadManager.swift',
     'FlowGet\BrowserView.swift',
+    'FlowGet\GoogleSignInService.swift',
+    'FlowGet\LicensingService.swift',
+    'FlowGetTests\BrowserDownloadTests.swift',
     'FlowGetTests\URLInputTests.swift',
     'FlowGetTests\PolicyTests.swift'
 )
