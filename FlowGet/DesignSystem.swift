@@ -28,7 +28,7 @@ struct FlowGetLogo: View {
 }
 
 struct FlowCard<Content: View>: View {
-    @ViewBuilder var content: Content
+    let content: Content
     var body: some View {
         content
             .frame(maxWidth: .infinity, alignment: .leading)

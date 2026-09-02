@@ -131,7 +131,7 @@ struct DrawerView: View {
         }
         .padding(.horizontal, 16)
         .background(FlowPalette.surface.ignoresSafeArea())
-        .clipShape(.rect(topTrailingRadius: 24, bottomTrailingRadius: 24))
+        .clipShape(.rect(bottomTrailingRadius: 24, topTrailingRadius: 24))
         .shadow(radius: 14)
     }
 }
