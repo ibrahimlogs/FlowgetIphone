@@ -3,7 +3,7 @@
 | Android area | iPhone implementation | Status |
 |---|---|---|
 | Compose design system | `DesignSystem.swift` + semantic color assets | Ported |
-| Login/session storage | `AuthService.swift`, Keychain-backed session | Ported; production backend must register the iOS native client |
+| Login/session storage | `AuthService.swift`, Keychain-backed session | Ported; dedicated production iOS public client registered |
 | Downloads list/add/pause/delete/share | `DownloadsView.swift`, `DownloadManager.swift` | Ported for direct HTTP(S), with background URLSession persistence |
 | HLS/DASH muxing | URLSession source download | UI accepted; offline media muxing needs an AVFoundation-specific follow-up |
 | FTP | — | Not available through Apple's native URLSession stack |
@@ -17,6 +17,6 @@
 
 ## External contracts required for production parity
 
-The current production `client_id` belongs to the Android native client. The Laravel service must register an iOS client/platform value before native iPhone login can succeed. FlowShare and torrent payload parity also cannot be truthfully recreated as a second Swift protocol: the Android architecture explicitly treats the shared Rust protocol-v3 core as authoritative. Compile that core for iOS as an XCFramework and connect it at the clearly marked FlowShare/torrent UI boundary.
+The production iPhone app uses its own dedicated `ios` public client; the Android public client remains separate and platform-bound. FlowShare and torrent payload parity also cannot be truthfully recreated as a second Swift protocol: the Android architecture explicitly treats the shared Rust protocol-v3 core as authoritative. Compile that core for iOS as an XCFramework and connect it at the clearly marked FlowShare/torrent UI boundary.
 
 No file under `FlowGetAndroid` was changed while creating this project.

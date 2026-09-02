@@ -14,7 +14,7 @@ Native Swift/SwiftUI port of the FlowGet Android application. The project is int
 2. Open `FlowGet.xcodeproj`.
 3. Select the `FlowGet` target, choose **Signing & Capabilities**, and select your team.
 4. Change the bundle identifier if `com.flowget.ios` is not available to your team.
-5. Replace `FLOWGET_IOS_CLIENT_ID` in `Info.plist` with the iOS native client ID registered by the FlowGet Laravel backend.
+5. Keep `FLOWGET_IOS_CLIENT_ID` in `Info.plist` set to the dedicated public iOS client registered by the FlowGet Laravel backend.
 6. Run on an iPhone or simulator.
 7. Run `zsh verify-on-mac.sh` from Terminal to clean-build and execute the unit tests.
 
