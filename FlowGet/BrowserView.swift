@@ -255,6 +255,8 @@ struct BrowserPage: View {
     @State private var showAdd = false
     @State private var downloadCandidates: [URL] = []
     @State private var showDownloadCandidates = false
+    @State private var downloadFeedback = ""
+    @State private var showDownloadFeedback = false
 
     init(initialURL: URL, settings: AppSettings) {
         self.initialURL = initialURL
@@ -313,6 +315,11 @@ struct BrowserPage: View {
             Button("Enter URL manually") { showAdd = true }
             Button("Cancel", role: .cancel) {}
         }
+        .alert("FlowGet Download", isPresented: $showDownloadFeedback) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(downloadFeedback)
+        }
     }
 
     private func browserAction(_ icon: String, _ label: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
@@ -338,6 +345,13 @@ struct BrowserPage: View {
           };
           document.querySelectorAll('a[download]').forEach(node => add(node.href));
           document.querySelectorAll('video[src], audio[src], source[src]').forEach(node => add(node.src));
+          document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:audio"], meta[name="twitter:player:stream"]').forEach(node => add(node.content));
+          document.querySelectorAll('[data-video], [data-video-url], [data-file], [data-stream], [data-src]').forEach(node => {
+            ['video', 'videoUrl', 'file', 'stream', 'src'].forEach(key => add(node.dataset[key]));
+          });
+          performance.getEntriesByType('resource').forEach(entry => {
+            if (/\.(zip|rar|7z|pdf|docx?|xlsx?|pptx?|mp3|m4a|wav|flac|mp4|m4v|mov|mkv|webm)(?:$|[?#])/i.test(entry.name)) add(entry.name);
+          });
           document.querySelectorAll('a[href]').forEach(node => {
             if (/\.(zip|rar|7z|pdf|docx?|xlsx?|pptx?|apk|dmg|exe|mp3|m4a|wav|flac|mp4|m4v|mov|mkv|webm)(?:$|[?#])/i.test(node.href)) add(node.href);
           });
@@ -361,7 +375,12 @@ struct BrowserPage: View {
 
     private func enqueue(_ url: URL) {
         BrowserDownloadSupport.prepareRequest(for: url, in: webView) { request in
-            store.downloads.add(request: request, title: url.lastPathComponent.nonEmpty)
+            if store.downloads.add(request: request, title: url.lastPathComponent.nonEmpty) != nil {
+                downloadFeedback = "Added to Downloads. You can follow its progress from the Downloads screen."
+            } else {
+                downloadFeedback = "This page did not provide a valid HTTP or HTTPS download request."
+            }
+            showDownloadFeedback = true
         }
     }
 }

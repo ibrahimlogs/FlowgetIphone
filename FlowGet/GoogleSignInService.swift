@@ -63,7 +63,7 @@ final class GoogleSignInService {
                 if let error {
                     let nsError = error as NSError
                     if nsError.domain == kGIDSignInErrorDomain,
-                       nsError.code == GIDSignInErrorCode.canceled.rawValue {
+                       nsError.code == GIDSignInError.canceled.rawValue {
                         continuation.resume(throwing: GoogleSignInFlowError.cancelled)
                     } else {
                         continuation.resume(throwing: GoogleSignInFlowError.failed(error.localizedDescription))

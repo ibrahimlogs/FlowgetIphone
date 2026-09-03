@@ -29,12 +29,25 @@ final class DownloadManager: NSObject, ObservableObject {
         restoreBackgroundTasks()
     }
 
-    func add(url: URL, title: String? = nil, wifiOnly: Bool = false, autoStart: Bool = true) {
-        add(request: URLRequest(url: url), title: title, wifiOnly: wifiOnly, autoStart: autoStart)
+    @discardableResult
+    func add(url: URL, title: String? = nil, wifiOnly: Bool = false, autoStart: Bool = true) -> UUID? {
+        add(request: Self.directRequest(for: url), title: title, wifiOnly: wifiOnly, autoStart: autoStart)
     }
 
-    func add(request: URLRequest, title: String? = nil, wifiOnly: Bool = false, autoStart: Bool = true) {
-        guard let url = request.url else { return }
+    @discardableResult
+    func add(request: URLRequest, title: String? = nil, wifiOnly: Bool = false, autoStart: Bool = true) -> UUID? {
+        guard let url = request.url,
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme) else { return nil }
+        var request = request
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 60
+        if request.value(forHTTPHeaderField: "Accept") == nil {
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+        }
+        if request.value(forHTTPHeaderField: "User-Agent") == nil {
+            request.setValue(Self.downloadUserAgent, forHTTPHeaderField: "User-Agent")
+        }
         var item = DownloadItem(title: title?.nonEmpty ?? url.lastPathComponent.nonEmpty ?? url.host ?? "Download", url: url)
         item.wifiOnly = wifiOnly
         item.autoStart = autoStart
@@ -43,6 +56,7 @@ final class DownloadManager: NSObject, ObservableObject {
         persist()
         onActivity?(ActivityItem(title: "Download added", detail: item.title, kind: .download))
         if autoStart { start(item.id) }
+        return item.id
     }
 
     func apply(settings: AppSettings) {
@@ -171,6 +185,15 @@ final class DownloadManager: NSObject, ObservableObject {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }
+
+    static func directRequest(for url: URL) -> URLRequest {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue(downloadUserAgent, forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
+    private static let downloadUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 FlowGet/\(AppConfig.version)"
 }
 
 extension DownloadManager: URLSessionDownloadDelegate {
@@ -205,6 +228,16 @@ extension DownloadManager: URLSessionDownloadDelegate {
         Task { @MainActor in
             guard let id = self.idByTask[taskID] ?? downloadTask.taskDescription.flatMap(UUID.init(uuidString:)),
                   let index = self.items.firstIndex(where: { $0.id == id }) else { return }
+            if let response = downloadTask.response as? HTTPURLResponse,
+               !(200..<300).contains(response.statusCode) {
+                self.items[index].status = .failed
+                self.items[index].speedBytesPerSecond = 0
+                self.items[index].errorMessage = "The server rejected the download (HTTP \(response.statusCode))."
+                self.requestByID[id] = nil
+                self.persist()
+                self.finishTask(id)
+                return
+            }
             let safeName = (suggested?.nonEmpty ?? self.items[index].title).replacingOccurrences(of: "/", with: "-")
             let uniqueName = "\(id.uuidString.prefix(8))-\(safeName)"
             let destination = Self.downloadFolder.appendingPathComponent(uniqueName)
@@ -214,6 +247,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.items[index].status = .completed
                 self.items[index].completedAt = Date()
                 self.items[index].localFileName = uniqueName
+                self.items[index].mimeType = downloadTask.response?.mimeType
                 self.requestByID[id] = nil
                 try? FileManager.default.removeItem(at: Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume"))
                 let diskSize = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize

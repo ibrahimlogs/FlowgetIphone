@@ -184,7 +184,7 @@ private struct DownloadRow: View {
                 FlowIcon(name: icon)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(item.title).font(.flowTitleSmall).lineLimit(1)
-                    Text(detail).font(.flowCaption).foregroundStyle(FlowPalette.secondary).lineLimit(1)
+                    Text(detail).font(.flowCaption).foregroundStyle(FlowPalette.secondary).lineLimit(2)
                 }
                 Spacer(minLength: 4)
                 statusMenu
@@ -345,7 +345,10 @@ struct AddDownloadView: View {
             error = mode == 2 ? "Torrent magnet support requires the native iOS core." : "Enter a valid HTTP or HTTPS link."
             return
         }
-        store.downloads.add(url: url, wifiOnly: wifiOnly, autoStart: autoStart)
+        guard store.downloads.add(url: url, wifiOnly: wifiOnly, autoStart: autoStart) != nil else {
+            error = "This link cannot be handed to the iOS download service."
+            return
+        }
         store.incomingURL = nil
         dismiss()
     }

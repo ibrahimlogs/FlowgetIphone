@@ -31,4 +31,12 @@ final class BrowserDownloadTests: XCTestCase {
             canShowMIMEType: true
         ))
     }
+
+    func testManualDownloadRequestUsesBroadAcceptAndBrowserCompatibleUserAgent() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/archive.zip"))
+        let request = DownloadManager.directRequest(for: url)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "*/*")
+        XCTAssertTrue(request.value(forHTTPHeaderField: "User-Agent")?.contains("FlowGet/") == true)
+        XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalCacheData)
+    }
 }
