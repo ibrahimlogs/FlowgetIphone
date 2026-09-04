@@ -257,7 +257,7 @@ struct BrowserPage: View {
     @State private var showDownloadCandidates = false
     @State private var downloadFeedback = ""
     @State private var showDownloadFeedback = false
-    @State private var requestedBrowserDownload: BrowserDownloadRequest?
+    @State private var showDownloadToast = false
 
     init(initialURL: URL, settings: AppSettings) {
         self.initialURL = initialURL
@@ -298,7 +298,6 @@ struct BrowserPage: View {
                 progress: $progress,
                 canBack: $canBack,
                 canForward: $canForward,
-                requestedDownload: $requestedBrowserDownload,
                 onWebDownloadEvent: handleWebDownload
             )
             HStack {
@@ -327,6 +326,21 @@ struct BrowserPage: View {
         } message: {
             Text(downloadFeedback)
         }
+        .overlay(alignment: .top) {
+            if showDownloadToast {
+                Label(downloadFeedback, systemImage: "arrow.down.circle.fill")
+                    .font(.flowBodySmall.weight(.semibold))
+                    .foregroundStyle(FlowPalette.onAction)
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 44)
+                    .background(FlowPalette.action)
+                    .clipShape(Capsule())
+                    .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(FlowMotion.standard, value: showDownloadToast)
     }
 
     private func browserAction(_ icon: String, _ label: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
@@ -382,30 +396,48 @@ struct BrowserPage: View {
 
     private func enqueue(_ url: URL) {
         BrowserDownloadSupport.prepareRequest(for: url, in: webView) { request in
-            requestedBrowserDownload = BrowserDownloadRequest(request: request)
+            DispatchQueue.main.async {
+                enqueuePreparedRequest(request, title: url.lastPathComponent.nonEmpty)
+            }
         }
     }
 
     private func handleWebDownload(_ event: BrowserDownloadEvent) {
         switch event {
+        case .request(let request, let title):
+            enqueuePreparedRequest(request, title: title)
         case .received(let download, let sourceURL, let webView):
             store.downloads.adoptBrowserDownload(download, sourceURL: sourceURL, webView: webView)
-            downloadFeedback = "Download started. You can follow its progress from Downloads."
+            showDownloadStarted()
         case .failed(let message):
             downloadFeedback = message
             showDownloadFeedback = true
         }
     }
+
+    private func enqueuePreparedRequest(_ request: URLRequest, title: String?) {
+        guard store.downloads.add(request: request, title: title) != nil else {
+            downloadFeedback = "The website did not provide a valid download URL."
+            showDownloadFeedback = true
+            return
+        }
+        showDownloadStarted()
+    }
+
+    private func showDownloadStarted() {
+        downloadFeedback = "Download started"
+        showDownloadToast = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            showDownloadToast = false
+        }
+    }
 }
 
 enum BrowserDownloadEvent {
+    case request(URLRequest, title: String?)
     case received(download: WKDownload, sourceURL: URL, webView: WKWebView)
     case failed(message: String)
-}
-
-struct BrowserDownloadRequest: Identifiable {
-    let id = UUID()
-    let request: URLRequest
 }
 
 struct WebContainer: UIViewRepresentable {
@@ -419,7 +451,6 @@ struct WebContainer: UIViewRepresentable {
     @Binding var progress: Double
     @Binding var canBack: Bool
     @Binding var canForward: Bool
-    @Binding var requestedDownload: BrowserDownloadRequest?
     let onWebDownloadEvent: (BrowserDownloadEvent) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -440,12 +471,7 @@ struct WebContainer: UIViewRepresentable {
         } else { webView.load(URLRequest(url: url)) }
         return webView
     }
-    func updateUIView(_ uiView: WKWebView, context: Context) {
-        context.coordinator.parent = self
-        guard let requestedDownload else { return }
-        DispatchQueue.main.async { self.requestedDownload = nil }
-        context.coordinator.start(requestedDownload, in: uiView)
-    }
+    func updateUIView(_ uiView: WKWebView, context: Context) { context.coordinator.parent = self }
 
     private static func blockingRules(aggressive: Bool) -> String {
         let standard = ["*doubleclick.net", "*googlesyndication.com", "*google-analytics.com", "*facebook.net"]
@@ -457,7 +483,6 @@ struct WebContainer: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var parent: WebContainer
         var observations: [NSKeyValueObservation] = []
-        private var startedRequestedDownloadIDs: Set<UUID> = []
         init(_ parent: WebContainer) { self.parent = parent }
         func observe(_ webView: WKWebView) {
             observations = [
@@ -473,15 +498,17 @@ struct WebContainer: UIViewRepresentable {
             guard ["http", "https", "about"].contains(scheme) else { decisionHandler(.cancel); return }
             if navigationAction.shouldPerformDownload,
                navigationAction.request.httpMethod?.uppercased() == "GET",
-               navigationAction.request.url != nil {
-                decisionHandler(.download)
+               let url = navigationAction.request.url {
+                decisionHandler(.cancel)
+                handOffDownload(url, request: navigationAction.request, webView: webView)
                 return
             }
             let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
             if isMainFrame,
                let url = navigationAction.request.url,
                BrowserDownloadSupport.isLikelyDownloadURL(url) {
-                decisionHandler(.download)
+                decisionHandler(.cancel)
+                handOffDownload(url, request: navigationAction.request, webView: webView)
                 return
             }
             decisionHandler(.allow)
@@ -498,7 +525,9 @@ struct WebContainer: UIViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
-            decisionHandler(.download)
+            decisionHandler(.cancel)
+            handOffDownload(url, request: URLRequest(url: url), webView: webView,
+                            title: navigationResponse.response.suggestedFilename)
         }
 
         func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
@@ -515,10 +544,19 @@ struct WebContainer: UIViewRepresentable {
             return nil
         }
 
-        fileprivate func start(_ requestedDownload: BrowserDownloadRequest, in webView: WKWebView) {
-            guard startedRequestedDownloadIDs.insert(requestedDownload.id).inserted else { return }
-            webView.startDownload(using: requestedDownload.request) { [weak self] download in
-                self?.attach(download, fallbackURL: requestedDownload.request.url, webView: webView)
+        private func handOffDownload(
+            _ url: URL,
+            request: URLRequest,
+            webView: WKWebView,
+            title: String? = nil
+        ) {
+            BrowserDownloadSupport.prepareRequest(for: url, in: webView, baseRequest: request) { [self] prepared in
+                DispatchQueue.main.async {
+                    self.parent.onWebDownloadEvent(.request(
+                        prepared,
+                        title: title?.nonEmpty ?? url.lastPathComponent.nonEmpty
+                    ))
+                }
             }
         }
 

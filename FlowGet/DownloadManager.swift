@@ -38,9 +38,10 @@ final class DownloadManager: NSObject, ObservableObject {
     private var browserDownloadContexts: [ObjectIdentifier: BrowserDownloadContext] = [:]
     private var browserProgressObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
     private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.background(withIdentifier: "com.flowget.ios.downloads")
-        config.isDiscretionary = false
-        config.sessionSendsLaunchEvents = true
+        // The manager lives for the lifetime of AppStore, so a regular session
+        // continues across SwiftUI tab/view replacement without delegating file
+        // ownership to the background-session daemon.
+        let config = URLSessionConfiguration.default
         config.allowsCellularAccess = true
         config.waitsForConnectivity = true
         config.timeoutIntervalForResource = 7 * 24 * 60 * 60
