@@ -3,6 +3,12 @@ import UserNotifications
 import Combine
 import WebKit
 
+struct SecuredDownloadFile: Sendable {
+    let url: URL
+    let fileName: String
+    let byteCount: Int64
+}
+
 @MainActor
 final class DownloadManager: NSObject, ObservableObject {
     @Published private(set) var items: [DownloadItem]
@@ -132,8 +138,10 @@ final class DownloadManager: NSObject, ObservableObject {
         let uniqueName = "\(id.uuidString.prefix(8))-\(safeName)"
         let destination = Self.downloadFolder.appendingPathComponent(uniqueName)
         do {
-            try? FileManager.default.removeItem(at: destination)
-            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            if temporaryURL.standardizedFileURL != destination.standardizedFileURL {
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            }
             try? FileManager.default.setAttributes(
                 [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
                 ofItemAtPath: destination.path
@@ -296,7 +304,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-    static var downloadFolder: URL {
+    nonisolated static var downloadFolder: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let folder = documents.appendingPathComponent("FlowGet", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -367,18 +375,23 @@ extension DownloadManager: URLSessionDownloadDelegate {
             return
         }
 
-        // URLSession owns `location` only for the duration of this delegate
-        // callback. Move it synchronously to an app-controlled staging path
-        // before hopping to MainActor, otherwise a 100% download can fail when
-        // the system removes its temporary file as this method returns.
-        let stagedLocation: URL
+        guard let id = rawID.flatMap(UUID.init(uuidString:)) else { return }
+
+        // URLSession owns `location` only for this callback. Commit it directly
+        // to the final app-owned destination before returning. A second move on
+        // MainActor leaves a window where CFNetwork can reclaim its temporary
+        // file while the UI is being replaced during a tab change.
+        let secured: SecuredDownloadFile
         do {
-            stagedLocation = try Self.stageTemporaryDownload(location)
+            secured = try Self.secureTemporaryDownload(
+                location,
+                id: id,
+                suggestedName: suggested?.nonEmpty ?? "download"
+            )
         } catch {
             let message = error.localizedDescription
             Task { @MainActor in
-                guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
-                      let index = self.items.firstIndex(where: { $0.id == id }) else { return }
+                guard let index = self.items.firstIndex(where: { $0.id == id }) else { return }
                 self.items[index].status = .failed
                 self.items[index].speedBytesPerSecond = 0
                 self.items[index].errorMessage = message
@@ -390,38 +403,26 @@ extension DownloadManager: URLSessionDownloadDelegate {
         }
 
         Task { @MainActor in
-            guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
-                  let index = self.items.firstIndex(where: { $0.id == id }) else {
-                try? FileManager.default.removeItem(at: stagedLocation)
+            guard let index = self.items.firstIndex(where: { $0.id == id }) else {
+                try? FileManager.default.removeItem(at: secured.url)
                 return
             }
-            let safeName = Self.safeFileName(suggested?.nonEmpty ?? self.items[index].title)
-            let uniqueName = "\(id.uuidString.prefix(8))-\(safeName)"
-            let destination = Self.downloadFolder.appendingPathComponent(uniqueName)
-            do {
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.moveItem(at: stagedLocation, to: destination)
-                self.items[index].status = .completed
-                self.items[index].completedAt = Date()
-                self.items[index].localFileName = uniqueName
-                self.items[index].mimeType = mimeType
-                self.requestByID[id] = nil
-                try? FileManager.default.removeItem(at: Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume"))
-                let diskSize = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize
-                self.items[index].downloadedBytes = self.items[index].totalBytes ?? diskSize.map(Int64.init) ?? 0
-                self.items[index].speedBytesPerSecond = 0
-                self.onActivity?(ActivityItem(title: "Download completed", detail: self.items[index].title, kind: .download))
-                let content = UNMutableNotificationContent()
-                content.title = "Download completed"
-                content.body = self.items[index].title
-                content.sound = .default
-                UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id.uuidString, content: content, trigger: nil))
-            } catch {
-                self.items[index].status = .failed
-                self.items[index].errorMessage = Self.userFacingMessage(for: error)
-                try? FileManager.default.removeItem(at: stagedLocation)
-            }
+            self.items[index].status = .completed
+            self.items[index].completedAt = Date()
+            self.items[index].localFileName = secured.fileName
+            self.items[index].mimeType = mimeType
+            self.items[index].downloadedBytes = secured.byteCount
+            self.items[index].totalBytes = max(self.items[index].totalBytes ?? 0, secured.byteCount)
+            self.items[index].speedBytesPerSecond = 0
+            self.items[index].errorMessage = nil
             self.requestByID[id] = nil
+            try? FileManager.default.removeItem(at: Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume"))
+            self.onActivity?(ActivityItem(title: "Download completed", detail: self.items[index].title, kind: .download))
+            let content = UNMutableNotificationContent()
+            content.title = "Download completed"
+            content.body = self.items[index].title
+            content.sound = .default
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id.uuidString, content: content, trigger: nil))
             self.persist()
             self.finishTask(id)
         }
@@ -430,9 +431,17 @@ extension DownloadManager: URLSessionDownloadDelegate {
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error else { return }
         let taskID = task.taskIdentifier
+        let rawID = task.taskDescription
+        let suggestedName = task.response?.suggestedFilename?.nonEmpty ?? "download"
         Task { @MainActor in
-            guard let id = self.idByTask[taskID] ?? task.taskDescription.flatMap(UUID.init(uuidString:)),
+            guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
                   let index = self.items.firstIndex(where: { $0.id == id }), self.items[index].status != .paused else { return }
+            let committedURL = Self.downloadFolder.appendingPathComponent(
+                Self.finalFileName(id: id, suggestedName: suggestedName)
+            )
+            if self.items[index].status == .completed || FileManager.default.fileExists(atPath: committedURL.path) {
+                return
+            }
             if self.autoRetry && self.items[index].retryCount < 3 {
                 self.items[index].retryCount += 1
                 self.items[index].status = .retrying
@@ -475,11 +484,12 @@ extension DownloadManager: WKDownloadDelegate {
             return
         }
         let safeName = Self.safeFileName(suggestedFilename)
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FlowGetWebDownloads", isDirectory: true)
+        let folder = Self.downloadFolder
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let destination = folder.appendingPathComponent("\(active.id.uuidString)-\(safeName)")
+            let destination = folder.appendingPathComponent(
+                Self.finalFileName(id: active.id, suggestedName: safeName)
+            )
             try? FileManager.default.removeItem(at: destination)
             active.destination = destination
             active.suggestedName = safeName
@@ -543,10 +553,39 @@ extension DownloadManager {
         try FileManager.default.moveItem(at: location, to: staged)
         return staged
     }
+
+    nonisolated static func secureTemporaryDownload(
+        _ location: URL,
+        id: UUID,
+        suggestedName: String,
+        destinationFolder: URL? = nil
+    ) throws -> SecuredDownloadFile {
+        let folder = destinationFolder ?? downloadFolder
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fileName = finalFileName(id: id, suggestedName: suggestedName)
+        let destination = folder.appendingPathComponent(fileName)
+        if !FileManager.default.fileExists(atPath: location.path),
+           FileManager.default.fileExists(atPath: destination.path) {
+            let bytes = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            return SecuredDownloadFile(url: destination, fileName: fileName, byteCount: Int64(bytes))
+        }
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: location, to: destination)
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: destination.path
+        )
+        let bytes = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        return SecuredDownloadFile(url: destination, fileName: fileName, byteCount: Int64(bytes))
+    }
+
+    nonisolated static func finalFileName(id: UUID, suggestedName: String) -> String {
+        "\(id.uuidString.prefix(8))-\(safeFileName(suggestedName))"
+    }
 }
 
 private extension DownloadManager {
-    static func safeFileName(_ value: String) -> String {
+    nonisolated static func safeFileName(_ value: String) -> String {
         let invalid = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/\\:"))
         let cleaned = value.unicodeScalars.map { invalid.contains($0) ? "-" : String($0) }.joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)

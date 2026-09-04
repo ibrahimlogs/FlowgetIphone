@@ -53,4 +53,38 @@ final class BrowserDownloadTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
         XCTAssertEqual(try Data(contentsOf: staged), payload)
     }
+
+    func testURLSessionTemporaryFileCanBeCommittedDirectlyToFinalFolder() throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flowget-source-\(UUID().uuidString)")
+        let destinationFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flowget-final-\(UUID().uuidString)", isDirectory: true)
+        let payload = Data(repeating: 0x5A, count: 4096)
+        try payload.write(to: source)
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: destinationFolder)
+        }
+
+        let secured = try DownloadManager.secureTemporaryDownload(
+            source,
+            id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+            suggestedName: "10Mb.dat",
+            destinationFolder: destinationFolder
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(secured.fileName, "11111111-10Mb.dat")
+        XCTAssertEqual(secured.byteCount, Int64(payload.count))
+        XCTAssertEqual(try Data(contentsOf: secured.url), payload)
+
+        let duplicateCallback = try DownloadManager.secureTemporaryDownload(
+            source,
+            id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+            suggestedName: "10Mb.dat",
+            destinationFolder: destinationFolder
+        )
+        XCTAssertEqual(duplicateCallback.url, secured.url)
+        XCTAssertEqual(duplicateCallback.byteCount, secured.byteCount)
+    }
 }
