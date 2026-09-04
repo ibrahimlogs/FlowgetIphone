@@ -68,6 +68,7 @@ final class FlowShareCoordinator: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var focusedTransferID: String?
     @Published private(set) var sessionTitle: String?
+    @Published private(set) var connectedFriend: FlowShareDevice?
     @Published var errorMessage: String?
 
     private struct Registration {
@@ -104,6 +105,8 @@ final class FlowShareCoordinator: ObservableObject {
     private var peerByTransfer: [String: String] = [:]
     private var completedAcknowledged: Set<String> = []
     private var acceptedFriendSessions: Set<String> = []
+    private var connectedFriendSession: FriendSession?
+    private var connectedFriendCode: String?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init() {
@@ -161,6 +164,9 @@ final class FlowShareCoordinator: ObservableObject {
         peerByTransfer.removeAll()
         completedAcknowledged.removeAll()
         acceptedFriendSessions.removeAll()
+        connectedFriendSession = nil
+        connectedFriendCode = nil
+        connectedFriend = nil
         focusedTransferID = nil
         sessionTitle = nil
         context = nil
@@ -212,13 +218,23 @@ final class FlowShareCoordinator: ObservableObject {
             for (index, file) in files.enumerated() {
                 let friend: FriendSession
                 if index == 0 {
-                    friend = try await resolveFriend(code: normalized)
+                    if let connectedFriendSession,
+                       connectedFriendCode == normalized,
+                       connectedFriendSession.expiresAt > Date().addingTimeInterval(15),
+                       (connectedFriendSession.target.receiverBootstrapExpiresAt ?? .distantPast) > Date().addingTimeInterval(15) {
+                        friend = connectedFriendSession
+                    } else {
+                        friend = try await resolveFriend(code: normalized)
+                    }
                 } else {
                     friend = try await resolveFriendWithFreshBootstrap(
                         code: normalized,
                         differentFrom: previousBootstrapID
                     )
                 }
+                self.connectedFriendSession = nil
+                self.connectedFriendCode = normalized
+                connectedFriend = friend.target
                 previousBootstrapID = friend.target.receiverBootstrapID
                 let transferID = try await send(file: file, target: friend.target, friend: friend)
                 if index < files.count - 1 { try await waitForTerminal(transferID: transferID) }
@@ -227,6 +243,37 @@ final class FlowShareCoordinator: ObservableObject {
             errorMessage = Self.message(for: error)
             if focusedTransferID == nil { sessionTitle = nil }
         }
+    }
+
+    func connect(friendCode: String) async {
+        guard !isBusy else { return }
+        let normalized = FlowShareWirePolicy.normalizeFriendCode(friendCode)
+        guard normalized.count == 12 else {
+            errorMessage = FlowShareClientError.invalidCode.localizedDescription
+            return
+        }
+        isBusy = true
+        focusedTransferID = nil
+        sessionTitle = "Connecting via Friend Code"
+        errorMessage = nil
+        defer { isBusy = false }
+        do {
+            let friend = try await resolveFriend(code: normalized)
+            connectedFriendSession = friend
+            connectedFriendCode = normalized
+            connectedFriend = friend.target
+            sessionTitle = nil
+        } catch {
+            disconnectFriend()
+            errorMessage = Self.message(for: error)
+        }
+    }
+
+    func disconnectFriend() {
+        connectedFriendSession = nil
+        connectedFriendCode = nil
+        connectedFriend = nil
+        if focusedTransferID == nil { sessionTitle = nil }
     }
 
     func createReceiveCode() async {

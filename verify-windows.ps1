@@ -72,7 +72,8 @@ if ($infoPlist -notmatch 'NSAppTransportSecurity' -or $infoPlist -notmatch 'NSAl
 $flowShareSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'FlowShareCoordinator.swift')
 if ($flowShareSource -notmatch 'validSignalingEndpoint' -or
     $flowShareSource -notmatch 'sendAckConfirmed' -or
-    $flowShareSource -notmatch 'awaitReceiverReady') {
+    $flowShareSource -notmatch 'awaitReceiverReady' -or
+    $flowShareSource -notmatch 'func connect\(friendCode:') {
     throw 'FlowShare signaling validation, receiver readiness, or durable acknowledgement handling is missing.'
 }
 

@@ -219,27 +219,56 @@ struct FlowShareView: View {
                     TextField("Receiver code", text: $friendCode)
                         .font(.flowBody).textInputAutocapitalization(.characters).autocorrectionDisabled()
                     Button("Connect") {
-                        Task { await flowShare.send(files: selectedFiles, friendCode: friendCode) }
+                        Task {
+                            await flowShare.connect(friendCode: friendCode)
+                            if flowShare.connectedFriend != nil { selectedDeviceID = nil }
+                        }
                     }
-                    .font(.flowTitleSmall).disabled(friendCode.filter { $0.isLetter || $0.isNumber }.count != 12 || selectedFiles.isEmpty || flowShare.isBusy)
+                    .font(.flowTitleSmall)
+                    .disabled(friendCode.filter { $0.isLetter || $0.isNumber }.count != 12 || flowShare.isBusy)
                 }
                 .padding(.horizontal, 14).frame(height: 54)
                 .background(FlowPalette.surface).clipShape(RoundedRectangle(cornerRadius: FlowRadius.medium))
                 .overlay(RoundedRectangle(cornerRadius: FlowRadius.medium).stroke(FlowPalette.outline))
 
+                if let friend = flowShare.connectedFriend {
+                    FlowCard(content: HStack(spacing: 12) {
+                        FlowIcon(name: platformIcon(friend.platform), emphasized: true, size: 48)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Connected securely").font(.flowLabel).foregroundStyle(FlowPalette.success)
+                            Text(friend.displayName).font(.flowTitleSmall).lineLimit(1)
+                            Text("FlowShare Internet · One-time Code")
+                                .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+                        }
+                        Spacer()
+                        Button { flowShare.disconnectFriend() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 21)).foregroundStyle(FlowPalette.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Disconnect friend")
+                    }.padding(14), elevated: true)
+                }
+
                 FlowPrimaryButton(
                     title: flowShare.isBusy ? "Preparing…" : "Continue",
                     icon: "arrow.right",
-                    disabled: selectedFiles.isEmpty || selectedDeviceID == nil || flowShare.isBusy
+                    disabled: selectedFiles.isEmpty || !hasSelectedDestination || flowShare.isBusy
                 ) {
-                    guard let selectedDeviceID else { return }
-                    Task { await flowShare.send(files: selectedFiles, toDeviceID: selectedDeviceID) }
+                    if flowShare.connectedFriend != nil {
+                        Task { await flowShare.send(files: selectedFiles, friendCode: friendCode) }
+                    } else if let selectedDeviceID {
+                        Task { await flowShare.send(files: selectedFiles, toDeviceID: selectedDeviceID) }
+                    }
                 }
             }
             .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 28)
         }
         .scrollDismissesKeyboard(.interactively)
         .scrollIndicators(.hidden)
+        .onChange(of: friendCode) {
+            if flowShare.connectedFriend != nil { flowShare.disconnectFriend() }
+        }
     }
 
     private var receiveView: some View {
@@ -496,7 +525,10 @@ struct FlowShareView: View {
     }
 
     private func destinationRow(_ device: FlowShareDevice) -> some View {
-        Button { selectedDeviceID = device.id } label: {
+        Button {
+            selectedDeviceID = device.id
+            flowShare.disconnectFriend()
+        } label: {
             HStack(spacing: 12) {
                 FlowIcon(name: device.nearby ? "antenna.radiowaves.left.and.right" : platformIcon(device.platform))
                 VStack(alignment: .leading, spacing: 3) {
@@ -521,6 +553,10 @@ struct FlowShareView: View {
 
     private func isTerminal(_ transfer: FlowShareTransfer) -> Bool {
         ["Completed", "Cancelled", "Rejected", "Failed"].contains(transfer.state)
+    }
+
+    private var hasSelectedDestination: Bool {
+        selectedDeviceID != nil || flowShare.connectedFriend != nil
     }
 
     private func connectionLabel(for transfer: FlowShareTransfer) -> String {
