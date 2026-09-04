@@ -301,7 +301,7 @@ struct FlowShareView: View {
                     Text("Establishing an authenticated direct connection…")
                         .font(.flowBody).foregroundStyle(FlowPalette.secondary)
                         .multilineTextAlignment(.center)
-                }.frame(maxWidth: .infinity).padding(24)), elevated: true)
+                }.frame(maxWidth: .infinity).padding(24), elevated: true)
 
                 Text("Keep FlowGet open on both devices. The receiver will be asked to accept before file transfer begins.")
                     .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
@@ -334,7 +334,7 @@ struct FlowShareView: View {
                         .font(.flowTitleLarge)
                     Text(transfer.peerName ?? "FlowGet device")
                         .font(.flowBody).foregroundStyle(FlowPalette.secondary)
-                }.frame(maxWidth: .infinity).padding(22)), elevated: true)
+                }.frame(maxWidth: .infinity).padding(22), elevated: true)
 
                 FlowCard(content: VStack(alignment: .leading, spacing: 13) {
                     HStack(spacing: 12) {
@@ -357,7 +357,7 @@ struct FlowShareView: View {
                     if let error = transfer.errorCode, !error.isEmpty {
                         Text(error).font(.flowCaption).foregroundStyle(FlowPalette.danger)
                     }
-                }.padding(16)), elevated: !terminal)
+                }.padding(16), elevated: !terminal)
 
                 if terminal {
                     FlowPrimaryButton(title: transfer.state == "Completed" ? "Done" : "Close", icon: "checkmark") {
@@ -397,7 +397,7 @@ struct FlowShareView: View {
                         Text(request.fileName).font(.flowTitleSmall).lineLimit(2)
                         Text(request.fileSize.fileSize).font(.flowCaption).foregroundStyle(FlowPalette.secondary)
                     }
-                }.frame(maxWidth: .infinity).padding(22)), elevated: true)
+                }.frame(maxWidth: .infinity).padding(22), elevated: true)
 
                 Spacer()
                 FlowPrimaryButton(title: "Accept & receive", icon: "checkmark") {
