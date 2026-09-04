@@ -35,6 +35,8 @@ final class AppStore: ObservableObject {
     private let googleSignIn = GoogleSignInService()
     private var tokens: AuthTokens?
     private var licenseHeartbeatTask: Task<Void, Never>?
+    private var licenseRefreshTask: Task<Void, Never>?
+    private var licenseRefreshGeneration: UUID?
     private var flowShareRequested = false
 
     init() {
@@ -110,6 +112,8 @@ final class AppStore: ObservableObject {
     func logout() {
         let token = tokens?.accessToken
         licenseHeartbeatTask?.cancel(); licenseHeartbeatTask = nil
+        licenseRefreshTask?.cancel(); licenseRefreshTask = nil
+        licenseRefreshGeneration = nil
         tokens = nil; account = nil; session = .signedOut
         license = .notSynced
         flowShareRequested = false
@@ -127,11 +131,29 @@ final class AppStore: ObservableObject {
     }
 
     func refreshLicensing() async {
+        if let activeRefresh = licenseRefreshTask {
+            await activeRefresh.value
+            return
+        }
+        let refresh = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performLicensingRefresh()
+        }
+        let generation = UUID()
+        licenseRefreshTask = refresh
+        licenseRefreshGeneration = generation
+        await refresh.value
+        if licenseRefreshGeneration == generation {
+            licenseRefreshTask = nil
+            licenseRefreshGeneration = nil
+        }
+    }
+
+    private func performLicensingRefresh() async {
         guard session == .authenticated, let account else {
             license = .notSynced
             return
         }
-        guard !isRefreshingLicense else { return }
         licenseHeartbeatTask?.cancel()
         licenseHeartbeatTask = nil
         isRefreshingLicense = true
@@ -139,11 +161,15 @@ final class AppStore: ObservableObject {
         defer { isRefreshingLicense = false }
         do {
             let token = try await validAccessToken()
-            license = await licensingService.synchronize(
+            let snapshot = await licensingService.synchronize(
                 account: account,
                 accessToken: token,
                 deviceLabel: UIDevice.current.name
             )
+            guard !Task.isCancelled,
+                  session == .authenticated,
+                  self.account?.id == account.id else { return }
+            license = snapshot
             if flowShareRequested, let context = await licensingService.flowShareContext() {
                 await flowShare.activate(context: context)
             } else if flowShareRequested {
@@ -151,6 +177,9 @@ final class AppStore: ObservableObject {
             }
             startLicenseHeartbeatIfNeeded()
         } catch {
+            guard !Task.isCancelled,
+                  session == .authenticated,
+                  self.account?.id == account.id else { return }
             license = .unavailable(
                 (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
                 device: UIDevice.current.name
