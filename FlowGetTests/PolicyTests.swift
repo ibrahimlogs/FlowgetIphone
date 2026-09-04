@@ -22,4 +22,10 @@ final class PolicyTests: XCTestCase {
         let next = BackgroundScheduler.nextRunDate(for: [schedule], now: now, calendar: calendar)
         XCTAssertEqual(next, calendar.date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 13, minute: 30)))
     }
+
+    func testCompletedDownloadCannotBeOverwrittenByFailureCallback() {
+        XCTAssertFalse(DownloadOutcomePolicy.canApplyFailure(current: .completed, finalFileExists: true))
+        XCTAssertFalse(DownloadOutcomePolicy.canApplyFailure(current: .downloading, finalFileExists: true))
+        XCTAssertTrue(DownloadOutcomePolicy.canApplyFailure(current: .downloading, finalFileExists: false))
+    }
 }

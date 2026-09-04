@@ -483,6 +483,7 @@ struct WebContainer: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var parent: WebContainer
         var observations: [NSKeyValueObservation] = []
+        private var navigationRequests: [URL: URLRequest] = [:]
         init(_ parent: WebContainer) { self.parent = parent }
         func observe(_ webView: WKWebView) {
             observations = [
@@ -496,6 +497,9 @@ struct WebContainer: UIViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             guard let scheme = navigationAction.request.url?.scheme?.lowercased() else { decisionHandler(.cancel); return }
             guard ["http", "https", "about"].contains(scheme) else { decisionHandler(.cancel); return }
+            if let url = navigationAction.request.url {
+                navigationRequests[url] = navigationAction.request
+            }
             if navigationAction.shouldPerformDownload,
                navigationAction.request.httpMethod?.uppercased() == "GET",
                let url = navigationAction.request.url {
@@ -526,7 +530,7 @@ struct WebContainer: UIViewRepresentable {
                 return
             }
             decisionHandler(.cancel)
-            handOffDownload(url, request: URLRequest(url: url), webView: webView,
+            handOffDownload(url, request: navigationRequests.removeValue(forKey: url) ?? URLRequest(url: url), webView: webView,
                             title: navigationResponse.response.suggestedFilename)
         }
 
@@ -566,7 +570,19 @@ struct WebContainer: UIViewRepresentable {
                 download.cancel(nil)
                 return
             }
-            parent.onWebDownloadEvent(.received(download: download, sourceURL: sourceURL, webView: webView))
+            // Move the request into the AppStore-owned transfer engine before this
+            // coordinator or its web view can be destroyed by a tab switch.
+            BrowserDownloadSupport.prepareRequest(
+                for: sourceURL,
+                in: webView,
+                baseRequest: download.originalRequest
+            ) { [self] request in
+                download.cancel(nil)
+                parent.onWebDownloadEvent(.request(
+                    request,
+                    title: sourceURL.lastPathComponent.nonEmpty
+                ))
+            }
         }
     }
 }
@@ -598,7 +614,7 @@ enum BrowserDownloadSupport {
             webView.evaluateJavaScript("navigator.userAgent") { userAgent, _ in
                 var request = baseRequest ?? URLRequest(url: url)
                 request.url = url
-                request.httpMethod = "GET"
+                if request.httpMethod == nil { request.httpMethod = "GET" }
                 let eligible = cookies.filter { cookie in
                     guard let host = url.host?.lowercased() else { return false }
                     let domain = cookie.domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))

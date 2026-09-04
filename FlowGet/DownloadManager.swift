@@ -3,12 +3,6 @@ import UserNotifications
 import Combine
 import WebKit
 
-struct SecuredDownloadFile: Sendable {
-    let url: URL
-    let fileName: String
-    let byteCount: Int64
-}
-
 @MainActor
 final class DownloadManager: NSObject, ObservableObject {
     @Published private(set) var items: [DownloadItem]
@@ -16,8 +10,10 @@ final class DownloadManager: NSObject, ObservableObject {
     private(set) var maxConcurrent = 3
     private(set) var allowsCellularAccess = true
     private(set) var autoRetry = true
-    private var taskByID: [UUID: URLSessionDownloadTask] = [:]
+    private var taskByID: [UUID: URLSessionDataTask] = [:]
     private var idByTask: [Int: UUID] = [:]
+    nonisolated(unsafe) private var sinkByTask: [Int: DownloadFileSink] = [:]
+    nonisolated private let sinkLock = NSLock()
     private var requestByID: [UUID: URLRequest] = [:]
     private var progressSample: [UUID: (bytes: Int64, date: Date)] = [:]
     private struct BrowserDownloadContext {
@@ -37,11 +33,12 @@ final class DownloadManager: NSObject, ObservableObject {
     private var browserWebViews: [ObjectIdentifier: WKWebView] = [:]
     private var browserDownloadContexts: [ObjectIdentifier: BrowserDownloadContext] = [:]
     private var browserProgressObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
+    private let sessionConfiguration: URLSessionConfiguration
     private lazy var session: URLSession = {
         // The manager lives for the lifetime of AppStore, so a regular session
         // continues across SwiftUI tab/view replacement without delegating file
         // ownership to the background-session daemon.
-        let config = URLSessionConfiguration.default
+        let config = sessionConfiguration
         config.allowsCellularAccess = true
         config.waitsForConnectivity = true
         config.timeoutIntervalForResource = 7 * 24 * 60 * 60
@@ -49,8 +46,9 @@ final class DownloadManager: NSObject, ObservableObject {
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
-    override init() {
-        items = Persistence.load([DownloadItem].self, name: "downloads.json", fallback: [])
+    init(configuration: URLSessionConfiguration = .default, initialItems: [DownloadItem]? = nil) {
+        sessionConfiguration = configuration
+        items = initialItems ?? Persistence.load([DownloadItem].self, name: "downloads.json", fallback: [])
         super.init()
         _ = session
         restoreBackgroundTasks()
@@ -213,19 +211,17 @@ final class DownloadManager: NSObject, ObservableObject {
             persist()
             return
         }
-        let resumeURL = Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume")
-        let task: URLSessionDownloadTask
-        if let resumeData = try? Data(contentsOf: resumeURL), !resumeData.isEmpty {
-            task = session.downloadTask(withResumeData: resumeData)
-            try? FileManager.default.removeItem(at: resumeURL)
-        } else {
-            var request = requestByID[id] ?? URLRequest(url: item.url)
-            request.allowsCellularAccess = allowsCellularAccess && !item.wifiOnly
-            task = session.downloadTask(with: request)
+        var request = requestByID[id] ?? Self.directRequest(for: item.url)
+        request.allowsCellularAccess = allowsCellularAccess && !item.wifiOnly
+        let partial = Self.partialFolder.appendingPathComponent("\(id.uuidString).partial")
+        if let size = (try? partial.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init), size > 0 {
+            request.setValue("bytes=\(size)-", forHTTPHeaderField: "Range")
         }
+        let task = session.dataTask(with: request)
         task.taskDescription = id.uuidString
         taskByID[id] = task
         idByTask[task.taskIdentifier] = id
+        setSink(DownloadFileSink(id: id), for: task.taskIdentifier)
         items[index].status = .downloading
         items[index].errorMessage = nil
         progressSample[id] = (items[index].downloadedBytes, Date())
@@ -234,11 +230,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func pause(_ id: UUID) {
-        let resumeURL = Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume")
-        taskByID[id]?.cancel(byProducingResumeData: { data in
-            guard let data else { return }
-            try? data.write(to: resumeURL, options: [.atomic, .completeFileProtection])
-        })
+        taskByID[id]?.cancel()
         update(id) { $0.status = .paused; $0.speedBytesPerSecond = 0 }
         taskByID[id] = nil
         idByTask = idByTask.filter { $0.value != id }
@@ -247,7 +239,11 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func remove(_ id: UUID) {
-        taskByID[id]?.cancel()
+        if let task = taskByID[id] {
+            sink(for: task.taskIdentifier)?.discard()
+            setSink(nil, for: task.taskIdentifier)
+            task.cancel()
+        }
         if let key = browserDownloadContexts.first(where: { $0.value.id == id })?.key {
             browserDownloads[key]?.cancel(nil)
             releaseBrowserDownload(key)
@@ -281,6 +277,44 @@ final class DownloadManager: NSObject, ObservableObject {
         startNextQueuedIfPossible()
     }
 
+    private func acceptCommit(_ commit: DownloadCommit, id: UUID, mimeType: String?) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else {
+            try? FileManager.default.removeItem(at: commit.url)
+            return
+        }
+        // A late completion/error callback is idempotent and cannot demote a commit.
+        guard items[index].status != .completed else { return }
+        items[index].status = .completed
+        items[index].completedAt = Date()
+        items[index].localFileName = commit.fileName
+        items[index].mimeType = mimeType
+        items[index].downloadedBytes = commit.byteCount
+        items[index].totalBytes = commit.byteCount
+        items[index].speedBytesPerSecond = 0
+        items[index].errorMessage = nil
+        requestByID[id] = nil
+        onActivity?(ActivityItem(title: "Download completed", detail: items[index].title, kind: .download))
+        let content = UNMutableNotificationContent()
+        content.title = "Download completed"
+        content.body = items[index].title
+        content.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: id.uuidString, content: content, trigger: nil)
+        )
+        persist()
+        finishTask(id)
+    }
+
+    private func failTask(id: UUID, error: Error) {
+        guard let index = items.firstIndex(where: { $0.id == id }), items[index].status != .completed else { return }
+        items[index].status = .failed
+        items[index].speedBytesPerSecond = 0
+        items[index].errorMessage = Self.userFacingMessage(for: error)
+        requestByID[id] = nil
+        persist()
+        finishTask(id)
+    }
+
     private func startNextQueuedIfPossible() {
         while taskByID.count < maxConcurrent,
               let next = items.first(where: { $0.status == .queued && $0.autoStart }) {
@@ -293,9 +327,10 @@ final class DownloadManager: NSObject, ObservableObject {
             Task { @MainActor in
                 for task in tasks {
                     guard let rawID = task.taskDescription, let id = UUID(uuidString: rawID),
-                          let downloadTask = task as? URLSessionDownloadTask else { continue }
-                    self.taskByID[id] = downloadTask
+                          let dataTask = task as? URLSessionDataTask else { continue }
+                    self.taskByID[id] = dataTask
                     self.idByTask[task.taskIdentifier] = id
+                    self.setSink(DownloadFileSink(id: id), for: task.taskIdentifier)
                     self.update(id) { item in
                         item.status = task.state == .suspended ? .paused : .downloading
                     }
@@ -319,6 +354,30 @@ final class DownloadManager: NSObject, ObservableObject {
         return folder
     }
 
+    nonisolated static var partialFolder: URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let folder = caches.appendingPathComponent("FlowGet/Partial", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    nonisolated private func setSink(_ sink: DownloadFileSink?, for taskID: Int) {
+        sinkLock.lock(); defer { sinkLock.unlock() }
+        sinkByTask[taskID] = sink
+    }
+
+    nonisolated private func sink(for taskID: Int) -> DownloadFileSink? {
+        sinkLock.lock(); defer { sinkLock.unlock() }
+        return sinkByTask[taskID]
+    }
+
+    nonisolated static func log(_ error: Error, source: URL?, destination: URL?) {
+        let value = error as NSError
+        let sourcePath = source?.path ?? "nil"
+        let destinationPath = destination?.path ?? "nil"
+        print("FlowGet download error domain=\(value.domain) code=\(value.code) description=\(value.localizedDescription) userInfo=\(value.userInfo) source=\(sourcePath) destination=\(destinationPath)")
+    }
+
     static func directRequest(for url: URL) -> URLRequest {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
         request.setValue("*/*", forHTTPHeaderField: "Accept")
@@ -329,120 +388,100 @@ final class DownloadManager: NSObject, ObservableObject {
     private static let downloadUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 FlowGet/\(AppConfig.version)"
 }
 
-extension DownloadManager: URLSessionDownloadDelegate {
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                               didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
-                               totalBytesExpectedToWrite: Int64) {
-        let taskID = downloadTask.taskIdentifier
-        Task { @MainActor in
-            guard let id = self.idByTask[taskID] ?? downloadTask.taskDescription.flatMap(UUID.init(uuidString:)) else { return }
-            self.update(id) { item in
-                item.status = .downloading
-                item.downloadedBytes = totalBytesWritten
-                item.totalBytes = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil
-                let now = Date()
-                if let previous = self.progressSample[id] {
-                    let elapsed = now.timeIntervalSince(previous.date)
-                    if elapsed >= 0.35 {
-                        item.speedBytesPerSecond = max(0, Int64(Double(totalBytesWritten - previous.bytes) / elapsed))
-                        self.progressSample[id] = (totalBytesWritten, now)
-                    }
-                } else {
-                    self.progressSample[id] = (totalBytesWritten, now)
-                }
+extension DownloadManager: URLSessionDataDelegate {
+    nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                               didReceive response: URLResponse,
+                               completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let sink = sink(for: dataTask.taskIdentifier) else {
+            completionHandler(.cancel)
+            return
+        }
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            completionHandler(.cancel)
+            return
+        }
+        do {
+            let http = response as? HTTPURLResponse
+            let append = http?.statusCode == 206
+            let existing = try sink.open(append: append)
+            let expected = response.expectedContentLength > 0 ? existing + response.expectedContentLength : nil
+            let taskID = dataTask.taskIdentifier
+            let rawID = dataTask.taskDescription
+            let mimeType = response.mimeType
+            Task { @MainActor in
+                guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
+                      let index = self.items.firstIndex(where: { $0.id == id }),
+                      self.items[index].status != .completed else { return }
+                self.items[index].mimeType = mimeType
+                self.items[index].downloadedBytes = existing
+                self.items[index].totalBytes = expected
+                self.persist()
             }
+            completionHandler(.allow)
+        } catch {
+            Self.log(error, source: nil, destination: Self.partialFolder)
+            completionHandler(.cancel)
         }
     }
 
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                               didFinishDownloadingTo location: URL) {
-        let taskID = downloadTask.taskIdentifier
-        let rawID = downloadTask.taskDescription
-        let suggested = downloadTask.response?.suggestedFilename
-        let mimeType = downloadTask.response?.mimeType
-        if let response = downloadTask.response as? HTTPURLResponse,
-           !(200..<300).contains(response.statusCode) {
-            let statusCode = response.statusCode
+    nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let taskID = dataTask.taskIdentifier
+        let rawID = dataTask.taskDescription
+        do {
+            guard let completed = try sink(for: taskID)?.write(data) else { return }
             Task { @MainActor in
                 guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
-                      let index = self.items.firstIndex(where: { $0.id == id }) else { return }
-                self.items[index].status = .failed
-                self.items[index].speedBytesPerSecond = 0
-                self.items[index].errorMessage = "The server rejected the download (HTTP \(statusCode))."
-                self.requestByID[id] = nil
-                self.persist()
-                self.finishTask(id)
+                      let index = self.items.firstIndex(where: { $0.id == id }),
+                      self.items[index].status == .downloading else { return }
+                let now = Date()
+                if let previous = self.progressSample[id] {
+                    let elapsed = now.timeIntervalSince(previous.date)
+                    if elapsed >= 0.2 {
+                        self.items[index].speedBytesPerSecond = max(0, Int64(Double(completed - previous.bytes) / elapsed))
+                        self.progressSample[id] = (completed, now)
+                    }
+                } else {
+                    self.progressSample[id] = (completed, now)
+                }
+                self.items[index].downloadedBytes = completed
             }
-            return
-        }
-
-        guard let id = rawID.flatMap(UUID.init(uuidString:)) else { return }
-
-        // URLSession owns `location` only for this callback. Commit it directly
-        // to the final app-owned destination before returning. A second move on
-        // MainActor leaves a window where CFNetwork can reclaim its temporary
-        // file while the UI is being replaced during a tab change.
-        let secured: SecuredDownloadFile
-        do {
-            secured = try Self.secureTemporaryDownload(
-                location,
-                id: id,
-                suggestedName: suggested?.nonEmpty ?? "download"
-            )
         } catch {
-            let message = error.localizedDescription
-            Task { @MainActor in
-                guard let index = self.items.firstIndex(where: { $0.id == id }) else { return }
-                self.items[index].status = .failed
-                self.items[index].speedBytesPerSecond = 0
-                self.items[index].errorMessage = message
-                self.requestByID[id] = nil
-                self.persist()
-                self.finishTask(id)
-            }
-            return
-        }
-
-        Task { @MainActor in
-            guard let index = self.items.firstIndex(where: { $0.id == id }) else {
-                try? FileManager.default.removeItem(at: secured.url)
-                return
-            }
-            self.items[index].status = .completed
-            self.items[index].completedAt = Date()
-            self.items[index].localFileName = secured.fileName
-            self.items[index].mimeType = mimeType
-            self.items[index].downloadedBytes = secured.byteCount
-            self.items[index].totalBytes = max(self.items[index].totalBytes ?? 0, secured.byteCount)
-            self.items[index].speedBytesPerSecond = 0
-            self.items[index].errorMessage = nil
-            self.requestByID[id] = nil
-            try? FileManager.default.removeItem(at: Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume"))
-            self.onActivity?(ActivityItem(title: "Download completed", detail: self.items[index].title, kind: .download))
-            let content = UNMutableNotificationContent()
-            content.title = "Download completed"
-            content.body = self.items[index].title
-            content.sound = .default
-            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id.uuidString, content: content, trigger: nil))
-            self.persist()
-            self.finishTask(id)
+            Self.log(error, source: nil, destination: Self.partialFolder)
+            dataTask.cancel()
         }
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let error else { return }
         let taskID = task.taskIdentifier
         let rawID = task.taskDescription
         let suggestedName = task.response?.suggestedFilename?.nonEmpty ?? "download"
+        let mimeType = task.response?.mimeType
+        guard let id = rawID.flatMap(UUID.init(uuidString:)), let sink = sink(for: taskID) else { return }
+        setSink(nil, for: taskID)
+
+        if error == nil {
+            do {
+                let committed = try sink.commit(id: id, suggestedName: suggestedName)
+                Task { @MainActor in self.acceptCommit(committed, id: id, mimeType: mimeType) }
+            } catch {
+                Self.log(error, source: Self.partialFolder.appendingPathComponent("\(id.uuidString).partial"),
+                         destination: Self.downloadFolder)
+                Task { @MainActor in self.failTask(id: id, error: error) }
+            }
+            return
+        }
+
+        guard let error else { return }
+        sink.closeForResume()
+        Self.log(error, source: Self.partialFolder.appendingPathComponent("\(id.uuidString).partial"),
+                 destination: Self.downloadFolder)
         Task { @MainActor in
             guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
                   let index = self.items.firstIndex(where: { $0.id == id }), self.items[index].status != .paused else { return }
-            let committedURL = Self.downloadFolder.appendingPathComponent(
-                Self.finalFileName(id: id, suggestedName: suggestedName)
-            )
-            if self.items[index].status == .completed || FileManager.default.fileExists(atPath: committedURL.path) {
-                return
-            }
+            let finalExists = self.items[index].localFileName.map {
+                FileManager.default.fileExists(atPath: Self.downloadFolder.appendingPathComponent($0).path)
+            } ?? false
+            guard DownloadOutcomePolicy.canApplyFailure(current: self.items[index].status, finalFileExists: finalExists) else { return }
             if self.autoRetry && self.items[index].retryCount < 3 {
                 self.items[index].retryCount += 1
                 self.items[index].status = .retrying
@@ -545,41 +584,6 @@ extension DownloadManager: WKDownloadDelegate {
 }
 
 extension DownloadManager {
-    nonisolated static func stageTemporaryDownload(_ location: URL) throws -> URL {
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FlowGetURLSessionStaging", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let staged = folder.appendingPathComponent(UUID().uuidString)
-        try? FileManager.default.removeItem(at: staged)
-        try FileManager.default.moveItem(at: location, to: staged)
-        return staged
-    }
-
-    nonisolated static func secureTemporaryDownload(
-        _ location: URL,
-        id: UUID,
-        suggestedName: String,
-        destinationFolder: URL? = nil
-    ) throws -> SecuredDownloadFile {
-        let folder = destinationFolder ?? downloadFolder
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let fileName = finalFileName(id: id, suggestedName: suggestedName)
-        let destination = folder.appendingPathComponent(fileName)
-        if !FileManager.default.fileExists(atPath: location.path),
-           FileManager.default.fileExists(atPath: destination.path) {
-            let bytes = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            return SecuredDownloadFile(url: destination, fileName: fileName, byteCount: Int64(bytes))
-        }
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: location, to: destination)
-        try? FileManager.default.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: destination.path
-        )
-        let bytes = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        return SecuredDownloadFile(url: destination, fileName: fileName, byteCount: Int64(bytes))
-    }
-
     nonisolated static func finalFileName(id: UUID, suggestedName: String) -> String {
         "\(id.uuidString.prefix(8))-\(safeFileName(suggestedName))"
     }

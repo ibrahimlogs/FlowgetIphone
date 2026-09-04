@@ -44,3 +44,9 @@ enum DownloadStatePolicy {
         return allowed[from]?.contains(to) == true
     }
 }
+
+enum DownloadOutcomePolicy {
+    static func canApplyFailure(current: DownloadStatus, finalFileExists: Bool) -> Bool {
+        current != .completed && !finalFileExists
+    }
+}
