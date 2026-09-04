@@ -34,11 +34,14 @@ FRAMEWORK_TMP="$BUILD_DIR/FlowGetNativeCore.xcframework"
 rm -rf "$GENERATED" "$HEADERS" "$FRAMEWORK_TMP"
 mkdir -p "$GENERATED" "$HEADERS"
 
-"$TARGET_DIR/release/uniffi-bindgen" generate \
-  --library "$TARGET_DIR/release/libflowget_flowshare_core.dylib" \
-  --language swift \
-  --no-format \
-  --out-dir "$GENERATED"
+(
+  cd "$CRATE_DIR"
+  "$TARGET_DIR/release/uniffi-bindgen" generate \
+    --library "$TARGET_DIR/release/libflowget_flowshare_core.dylib" \
+    --language swift \
+    --no-format \
+    --out-dir "$GENERATED"
+)
 
 # UniFFI's unformatted template leaves trailing blanks. Normalize only those
 # blanks so the checked-in ABI comparison remains deterministic on every host.
