@@ -6,12 +6,14 @@ enum NativeCoreBridgeError: LocalizedError {
     case incompatibleCore
     case sourceUnavailable
     case secureStorageUnavailable
+    case receiverNotReady
 
     var errorDescription: String? {
         switch self {
         case .incompatibleCore: "The installed FlowShare core is not compatible with protocol v3."
         case .sourceUnavailable: "The selected file is no longer available."
         case .secureStorageUnavailable: "FlowShare secure storage is unavailable on this device."
+        case .receiverNotReady: "The FlowShare receiver could not become ready for the sender."
         }
     }
 }
@@ -120,6 +122,25 @@ actor NativeCoreBridge {
         try await engine.startReceiver(request: startRequest(transferID: transferID, endpoint: endpoint))
     }
 
+    func awaitReceiverReady(transferID: String, timeoutSeconds: TimeInterval = 15) async throws -> FlowShareTransferStatus {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            let status = try await engine.getTransferStatus(request: TransferLookupRequest(
+                transferId: transferID,
+                direction: .receive
+            ))
+            switch status.state {
+            case .waitingForPeer, .connected, .transferring:
+                return status
+            case .failed, .cancelled, .rejected:
+                throw NativeCoreBridgeError.receiverNotReady
+            default:
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        throw NativeCoreBridgeError.receiverNotReady
+    }
+
     func pause(transferID: String, direction: FlowShareDirection) async throws -> FlowShareTransferStatus {
         try await engine.pause(request: TransferControlRequest(
             transferId: transferID,
@@ -155,8 +176,8 @@ actor NativeCoreBridge {
             transferId: transferID,
             signalingEndpoint: endpoint,
             allowLoopbackTest: false,
-            signalingTimeoutMs: 30_000,
-            connectivityTimeoutMs: 30_000
+            signalingTimeoutMs: 10 * 60 * 1_000,
+            connectivityTimeoutMs: 45_000
         )
     }
 

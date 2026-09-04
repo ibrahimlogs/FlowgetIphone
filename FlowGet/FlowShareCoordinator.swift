@@ -44,6 +44,18 @@ enum FlowShareWirePolicy {
               url.host?.lowercased() == AppConfig.flowShareBaseURL.host?.lowercased() else { return false }
         return url.path == "/ws"
     }
+
+    static func acknowledgementForExistingTransfer(state: String, isPending: Bool) -> String? {
+        guard !isPending else { return nil }
+        switch state {
+        case "Completed": return "completed"
+        case "Rejected": return "rejected"
+        case "Failed", "Cancelled": return "failed"
+        case "Waiting for peer", "Connecting", "Connected", "Transferring", "Resuming", "Verifying":
+            return "accepted"
+        default: return nil
+        }
+    }
 }
 
 @MainActor
@@ -54,6 +66,8 @@ final class FlowShareCoordinator: ObservableObject {
     @Published private(set) var incoming: [FlowShareIncomingRequest] = []
     @Published private(set) var invite: FlowShareInvite?
     @Published private(set) var isBusy = false
+    @Published private(set) var focusedTransferID: String?
+    @Published private(set) var sessionTitle: String?
     @Published var errorMessage: String?
 
     private struct Registration {
@@ -88,6 +102,7 @@ final class FlowShareCoordinator: ObservableObject {
     private var incomingCommandByTransfer: [String: String] = [:]
     private var peerByTransfer: [String: String] = [:]
     private var completedAcknowledged: Set<String> = []
+    private var acceptedFriendSessions: Set<String> = []
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init() {
@@ -140,6 +155,11 @@ final class FlowShareCoordinator: ObservableObject {
         startedCommands.removeAll()
         ackReceipts.removeAll()
         incomingCommandByTransfer.removeAll()
+        peerByTransfer.removeAll()
+        completedAcknowledged.removeAll()
+        acceptedFriendSessions.removeAll()
+        focusedTransferID = nil
+        sessionTitle = nil
         context = nil
         connection = .stopped
         endBackgroundTask()
@@ -156,6 +176,8 @@ final class FlowShareCoordinator: ObservableObject {
     func send(files: [URL], toDeviceID deviceID: String) async {
         guard !files.isEmpty, !isBusy else { return }
         isBusy = true
+        focusedTransferID = nil
+        sessionTitle = "Connecting to your device"
         errorMessage = nil
         defer { isBusy = false }
         do {
@@ -169,6 +191,7 @@ final class FlowShareCoordinator: ObservableObject {
             }
         } catch {
             errorMessage = Self.message(for: error)
+            if focusedTransferID == nil { sessionTitle = nil }
         }
     }
 
@@ -177,16 +200,29 @@ final class FlowShareCoordinator: ObservableObject {
         let normalized = FlowShareWirePolicy.normalizeFriendCode(friendCode)
         guard normalized.count == 12 else { errorMessage = FlowShareClientError.invalidCode.localizedDescription; return }
         isBusy = true
+        focusedTransferID = nil
+        sessionTitle = "Connecting via Friend Code"
         errorMessage = nil
         defer { isBusy = false }
         do {
+            var previousBootstrapID: String?
             for (index, file) in files.enumerated() {
-                let friend = try await resolveFriend(code: normalized)
+                let friend: FriendSession
+                if index == 0 {
+                    friend = try await resolveFriend(code: normalized)
+                } else {
+                    friend = try await resolveFriendWithFreshBootstrap(
+                        code: normalized,
+                        differentFrom: previousBootstrapID
+                    )
+                }
+                previousBootstrapID = friend.target.receiverBootstrapID
                 let transferID = try await send(file: file, target: friend.target, friend: friend)
                 if index < files.count - 1 { try await waitForTerminal(transferID: transferID) }
             }
         } catch {
             errorMessage = Self.message(for: error)
+            if focusedTransferID == nil { sessionTitle = nil }
         }
     }
 
@@ -210,14 +246,18 @@ final class FlowShareCoordinator: ObservableObject {
     func accept(_ request: FlowShareIncomingRequest) async {
         guard let native else { return }
         do {
+            focusedTransferID = request.transferID
+            sessionTitle = "Receiving from \(request.sourceDisplayName)"
             _ = try await native.accept(request)
             // The receiver listens before acceptance is acknowledged, preventing a fast-sender race.
             _ = try await native.startReceiver(transferID: request.transferID,
                                                endpoint: request.signalingEndpoint)
+            _ = try await native.awaitReceiverReady(transferID: request.transferID)
             guard try await sendAckConfirmed(commandID: request.commandID, status: "accepted") else {
                 _ = try? await native.cancel(transferID: request.transferID, direction: .receive)
                 throw FlowShareClientError.timedOut
             }
+            if let friendSessionID = request.friendSessionID { acceptedFriendSessions.insert(friendSessionID) }
             incoming.removeAll { $0.id == request.id }
         } catch {
             markFailed(transferID: request.transferID, message: Self.message(for: error))
@@ -236,6 +276,24 @@ final class FlowShareCoordinator: ObservableObject {
     func clearHistory() {
         transfers.removeAll { ["Completed", "Cancelled", "Rejected", "Failed"].contains($0.state) }
         persistTransfers()
+    }
+
+    var focusedTransfer: FlowShareTransfer? {
+        guard let focusedTransferID else { return nil }
+        return transfers.first { $0.id == focusedTransferID }
+    }
+
+    func dismissSession() {
+        focusedTransferID = nil
+        sessionTitle = nil
+    }
+
+    func cancelFocusedTransfer() async {
+        guard let transfer = focusedTransfer, let native else { dismissSession(); return }
+        let direction: FlowShareDirection = transfer.direction == .send ? .send : .receive
+        _ = try? await native.cancel(transferID: transfer.id, direction: direction)
+        updateTransfer(id: transfer.id) { $0.state = "Cancelled" }
+        dismissSession()
     }
 
     private func startPresenceLoop() {
@@ -374,7 +432,18 @@ final class FlowShareCoordinator: ObservableObject {
               let hash = payload["fileSha256"] as? String, FlowShareWirePolicy.validSHA256(hash),
               let expiryMS = message.int64("expiresUnixMs"), expiryMS > Int64(Date().timeIntervalSince1970 * 1_000) else { return }
         if incoming.contains(where: { $0.commandID == commandID }) {
-            try? await sendAck(commandID: commandID, status: "duplicate", detail: "already-processed")
+            // Reconnecting is expected after consuming a one-use receiver
+            // bootstrap. While the user is still deciding, never acknowledge
+            // this as a duplicate: the sender treats duplicate as permission
+            // to begin the native transfer.
+            return
+        }
+        if let existing = transfers.first(where: { $0.id == transferID }),
+           let acknowledgement = FlowShareWirePolicy.acknowledgementForExistingTransfer(
+            state: existing.state,
+            isPending: incoming.contains(where: { $0.transferID == transferID })
+           ) {
+            try? await sendAck(commandID: commandID, status: acknowledgement, detail: "already-processed")
             return
         }
         let request = FlowShareIncomingRequest(
@@ -389,7 +458,8 @@ final class FlowShareCoordinator: ObservableObject {
             fileSize: fileSize,
             fileSHA256: hash.lowercased(),
             expiresAt: Date(timeIntervalSince1970: TimeInterval(expiryMS) / 1_000),
-            friendTransfer: message["friendTransfer"] as? Bool == true
+            friendTransfer: message["friendTransfer"] as? Bool == true,
+            friendSessionID: message["friendSessionId"] as? String
         )
         do {
             let status = try await native.importInvitation(request)
@@ -397,8 +467,10 @@ final class FlowShareCoordinator: ObservableObject {
             incomingCommandByTransfer[transferID] = commandID
             peerByTransfer[transferID] = request.sourceDisplayName
             upsert(status: status, fileName: fileName, peerName: request.sourceDisplayName)
-            incoming.append(request)
-            // Receiver bootstraps are one-use. Reconnect immediately to advertise a fresh one.
+            let autoAccept = request.friendTransfer && request.friendSessionID.map(acceptedFriendSessions.contains) == true
+            if autoAccept { await accept(request) } else { incoming.append(request) }
+            // Receiver bootstraps are one-use. Reconnect after import (and, for
+            // an accepted friend batch, after its ACK) to advertise a fresh one.
             socket?.cancel(with: .goingAway, reason: nil)
         } catch {
             try? await sendAck(commandID: commandID, status: "failed", detail: "invitation-import-failed")
@@ -429,6 +501,7 @@ final class FlowShareCoordinator: ObservableObject {
     private func startOutgoing(commandID: String, pending: PendingOutgoing) {
         guard startedCommands.insert(commandID).inserted else { return }
         earlyAcceptedCommands.remove(commandID)
+        pendingOutgoing.removeValue(forKey: commandID)
         Task { [weak self] in
             guard let self, let native = self.native else { return }
             do {
@@ -436,6 +509,7 @@ final class FlowShareCoordinator: ObservableObject {
             } catch {
                 self.startedCommands.remove(commandID)
                 self.markFailed(transferID: pending.transferID, message: Self.message(for: error))
+                await native.releaseStagedSource(for: pending.transferID)
             }
         }
     }
@@ -450,6 +524,8 @@ final class FlowShareCoordinator: ObservableObject {
         let prepared = try await native.prepareSender(sourceURL: file,
                                                       receiverBootstrapPackage: bootstrap)
         let transferID = prepared.transfer.transferId
+        focusedTransferID = transferID
+        sessionTitle = friend == nil ? "Connecting to \(target.displayName)" : "Connecting via Friend Code"
         peerByTransfer[transferID] = target.displayName
         upsert(status: prepared.transfer,
                fileName: prepared.displayFilename,
@@ -540,6 +616,22 @@ final class FlowShareCoordinator: ObservableObject {
                              credential: credential,
                              expiresAt: Date(timeIntervalSince1970: TimeInterval(expiry) / 1_000),
                              target: target)
+    }
+
+    private func resolveFriendWithFreshBootstrap(
+        code: String,
+        differentFrom previousBootstrapID: String?
+    ) async throws -> FriendSession {
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            if let resolved = try? await resolveFriend(code: code),
+               let bootstrapID = resolved.target.receiverBootstrapID,
+               bootstrapID != previousBootstrapID {
+                return resolved
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        throw FlowShareClientError.targetUnavailable
     }
 
     private func waitForTerminal(transferID: String) async throws {

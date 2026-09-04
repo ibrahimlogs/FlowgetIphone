@@ -163,6 +163,7 @@ struct FlowShareIncomingRequest: Identifiable {
     let fileSHA256: String
     let expiresAt: Date
     let friendTransfer: Bool
+    let friendSessionID: String?
 }
 
 extension Int64 {

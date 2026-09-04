@@ -20,6 +20,9 @@
         <dict><key>CFBundleURLName</key><string>google-sign-in</string><key>CFBundleURLSchemes</key><array><string>com.googleusercontent.apps.CONFIGURE_GOOGLE_IOS_CLIENT_ID</string></array></dict>
     </array>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <!-- The user-facing browser/downloader intentionally supports arbitrary HTTP
+         sources. Auth, licensing and FlowShare clients still enforce fixed HTTPS origins. -->
+    <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
     <key>BGTaskSchedulerPermittedIdentifiers</key><array><string>com.flowget.ios.scheduled-downloads</string></array>
     <key>NSLocalNetworkUsageDescription</key><string>FlowGet finds compatible devices on your local network for direct file transfers.</string>
     <key>NSBonjourServices</key><array><string>_flowget._udp</string></array>

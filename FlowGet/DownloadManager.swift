@@ -18,6 +18,8 @@ final class DownloadManager: NSObject, ObservableObject {
         config.isDiscretionary = false
         config.sessionSendsLaunchEvents = true
         config.allowsCellularAccess = true
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForResource = 7 * 24 * 60 * 60
         config.httpMaximumConnectionsPerHost = 4
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
@@ -57,6 +59,74 @@ final class DownloadManager: NSObject, ObservableObject {
         onActivity?(ActivityItem(title: "Download added", detail: item.title, kind: .download))
         if autoStart { start(item.id) }
         return item.id
+    }
+
+    func beginBrowserDownload(id: UUID, sourceURL: URL, title: String) {
+        guard !items.contains(where: { $0.id == id }) else { return }
+        var item = DownloadItem(title: title.nonEmpty ?? sourceURL.lastPathComponent.nonEmpty ?? "Browser download",
+                                url: sourceURL)
+        item.id = id
+        item.status = .downloading
+        item.autoStart = false
+        items.insert(item, at: 0)
+        persist()
+        onActivity?(ActivityItem(title: "Browser download started", detail: item.title, kind: .download))
+    }
+
+    func completeBrowserDownload(id: UUID, temporaryURL: URL, suggestedName: String, mimeType: String?) {
+        defer { progressSample[id] = nil }
+        guard let index = items.firstIndex(where: { $0.id == id }) else {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            return
+        }
+        let safeName = Self.safeFileName(suggestedName.nonEmpty ?? items[index].title)
+        let uniqueName = "\(id.uuidString.prefix(8))-\(safeName)"
+        let destination = Self.downloadFolder.appendingPathComponent(uniqueName)
+        do {
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            try? FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: destination.path
+            )
+            let diskSize = try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            items[index].status = .completed
+            items[index].completedAt = Date()
+            items[index].localFileName = uniqueName
+            items[index].mimeType = mimeType
+            items[index].downloadedBytes = Int64(diskSize)
+            items[index].totalBytes = Int64(diskSize)
+            items[index].errorMessage = nil
+            onActivity?(ActivityItem(title: "Download completed", detail: items[index].title, kind: .download))
+        } catch {
+            items[index].status = .failed
+            items[index].errorMessage = Self.userFacingMessage(for: error)
+        }
+        persist()
+    }
+
+    func updateBrowserDownload(id: UUID, completedBytes: Int64, totalBytes: Int64?) {
+        guard let index = items.firstIndex(where: { $0.id == id }), items[index].status == .downloading else { return }
+        let now = Date()
+        if let previous = progressSample[id] {
+            let elapsed = now.timeIntervalSince(previous.date)
+            let finished = totalBytes.map { completedBytes >= $0 } ?? false
+            guard elapsed >= 0.35 || finished else { return }
+            items[index].speedBytesPerSecond = max(0, Int64(Double(completedBytes - previous.bytes) / max(elapsed, 0.001)))
+        }
+        items[index].downloadedBytes = max(0, completedBytes)
+        items[index].totalBytes = totalBytes.flatMap { $0 > 0 ? $0 : nil }
+        progressSample[id] = (completedBytes, now)
+        persist()
+    }
+
+    func failBrowserDownload(id: UUID?, message: String) {
+        guard let id, let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].status = .failed
+        items[index].speedBytesPerSecond = 0
+        items[index].errorMessage = message
+        progressSample[id] = nil
+        persist()
     }
 
     func apply(settings: AppSettings) {
@@ -238,7 +308,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.finishTask(id)
                 return
             }
-            let safeName = (suggested?.nonEmpty ?? self.items[index].title).replacingOccurrences(of: "/", with: "-")
+            let safeName = Self.safeFileName(suggested?.nonEmpty ?? self.items[index].title)
             let uniqueName = "\(id.uuidString.prefix(8))-\(safeName)"
             let destination = Self.downloadFolder.appendingPathComponent(uniqueName)
             do {
@@ -260,7 +330,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id.uuidString, content: content, trigger: nil))
             } catch {
                 self.items[index].status = .failed
-                self.items[index].errorMessage = error.localizedDescription
+                self.items[index].errorMessage = Self.userFacingMessage(for: error)
             }
             self.requestByID[id] = nil
             self.persist()
@@ -290,7 +360,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             }
             self.items[index].status = .failed
             self.items[index].speedBytesPerSecond = 0
-            self.items[index].errorMessage = error.localizedDescription
+            self.items[index].errorMessage = Self.userFacingMessage(for: error)
             self.requestByID[id] = nil
             self.persist()
             self.finishTask(id)
@@ -301,6 +371,32 @@ extension DownloadManager: URLSessionDownloadDelegate {
         DispatchQueue.main.async {
             FlowGetAppDelegate.backgroundSessionCompletion?()
             FlowGetAppDelegate.backgroundSessionCompletion = nil
+        }
+    }
+}
+
+private extension DownloadManager {
+    static func safeFileName(_ value: String) -> String {
+        let invalid = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/\\:"))
+        let cleaned = value.unicodeScalars.map { invalid.contains($0) ? "-" : String($0) }.joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((cleaned.nonEmpty ?? "download").prefix(180))
+    }
+
+    static func userFacingMessage(for error: Error) -> String {
+        let value = error as NSError
+        guard value.domain == NSURLErrorDomain else { return error.localizedDescription }
+        switch value.code {
+        case NSURLErrorAppTransportSecurityRequiresSecureConnection:
+            return "This HTTP server was blocked by iOS transport security. Update FlowGet and try again."
+        case NSURLErrorUserAuthenticationRequired:
+            return "The download requires authentication. Open it in the FlowGet browser and try again."
+        case NSURLErrorTimedOut:
+            return "The server stopped responding. Tap Resume to try again."
+        case NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost:
+            return "FlowGet could not reach the download server. Check the connection and tap Resume."
+        default:
+            return error.localizedDescription
         }
     }
 }

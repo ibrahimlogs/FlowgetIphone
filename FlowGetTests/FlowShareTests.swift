@@ -20,4 +20,19 @@ final class FlowShareTests: XCTestCase {
         XCTAssertFalse(FlowShareWirePolicy.validSignalingEndpoint("https://share.flowget.xyz/ws"))
         XCTAssertFalse(FlowShareWirePolicy.validSignalingEndpoint("wss://example.com/ws"))
     }
+
+    func testPendingIncomingCommandIsNeverAcknowledgedAsDuplicate() {
+        XCTAssertNil(FlowShareWirePolicy.acknowledgementForExistingTransfer(
+            state: "Awaiting acceptance",
+            isPending: true
+        ))
+        XCTAssertEqual(FlowShareWirePolicy.acknowledgementForExistingTransfer(
+            state: "Completed",
+            isPending: false
+        ), "completed")
+        XCTAssertEqual(FlowShareWirePolicy.acknowledgementForExistingTransfer(
+            state: "Transferring",
+            isPending: false
+        ), "accepted")
+    }
 }

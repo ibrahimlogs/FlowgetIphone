@@ -64,9 +64,21 @@ $pin = (Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'Native\flowshare-
 if ($pin -notmatch '^[0-9a-f]{40}$') { throw 'FlowShare core source must be pinned to a full Git commit.' }
 if ($project -notmatch 'FlowGetNativeCore\.xcframework') { throw 'The FlowShare XCFramework is not linked in the Xcode project.' }
 
+$infoPlist = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'Info.plist')
+if ($infoPlist -notmatch 'NSAppTransportSecurity' -or $infoPlist -notmatch 'NSAllowsArbitraryLoads') {
+    throw 'The user-facing downloader/browser must declare its intentional HTTP transport policy.'
+}
+
 $flowShareSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'FlowShareCoordinator.swift')
-if ($flowShareSource -notmatch 'validSignalingEndpoint' -or $flowShareSource -notmatch 'sendAckConfirmed') {
-    throw 'FlowShare signaling validation or durable acknowledgement handling is missing.'
+if ($flowShareSource -notmatch 'validSignalingEndpoint' -or
+    $flowShareSource -notmatch 'sendAckConfirmed' -or
+    $flowShareSource -notmatch 'awaitReceiverReady') {
+    throw 'FlowShare signaling validation, receiver readiness, or durable acknowledgement handling is missing.'
+}
+
+$browserSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'BrowserView.swift')
+if ($browserSource -notmatch 'WKDownloadDelegate' -or $browserSource -notmatch 'startDownload') {
+    throw 'Native authenticated WebKit download handling is missing.'
 }
 
 $swiftFiles = Get-ChildItem -LiteralPath $sourceRoot -Filter '*.swift'

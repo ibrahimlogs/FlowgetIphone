@@ -21,10 +21,16 @@ struct FlowShareView: View {
         VStack(spacing: 0) {
             topBar
             Group {
-                switch screen {
-                case .home: homeView
-                case .send: sendView
-                case .receive: receiveView
+                if let transfer = flowShare.focusedTransfer {
+                    transferSessionView(transfer)
+                } else if flowShare.isBusy {
+                    connectingSessionView
+                } else {
+                    switch screen {
+                    case .home: homeView
+                    case .send: sendView
+                    case .receive: receiveView
+                    }
                 }
             }
             .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .move(edge: .leading).combined(with: .opacity)))
@@ -36,20 +42,9 @@ struct FlowShareView: View {
         }
         .sheet(isPresented: $showHistory) { historySheet.presentationDetents([.medium, .large]).presentationDragIndicator(.visible) }
         .sheet(isPresented: $showReceiveCode) { receiveCodeSheet.presentationDetents([.medium]).presentationDragIndicator(.visible) }
-        .alert("Incoming file", isPresented: Binding(
-            get: { presentedIncoming != nil },
-            set: { if !$0 { presentedIncoming = nil } }
-        ), presenting: presentedIncoming) { request in
-            Button("Decline", role: .destructive) {
-                Task { await flowShare.reject(request) }
-                presentedIncoming = nil
-            }
-            Button("Accept") {
-                Task { await flowShare.accept(request) }
-                presentedIncoming = nil
-            }
-        } message: { request in
-            Text("\(request.sourceDisplayName) wants to send \(request.fileName) (\(request.fileSize.fileSize)).")
+        .fullScreenCover(item: $presentedIncoming) { request in
+            incomingRequestView(request)
+                .interactiveDismissDisabled()
         }
         .alert("FlowShare", isPresented: Binding(
             get: { flowShare.errorMessage != nil },
@@ -66,36 +61,45 @@ struct FlowShareView: View {
     }
 
     private var topBar: some View {
-        FlowTopBar(
-            title: screen == .home ? "FlowShare" : screen == .send ? "FlowShare – Send" : "FlowShare – Receive",
+        let transfer = flowShare.focusedTransfer
+        let isSession = transfer != nil || flowShare.isBusy
+        return FlowTopBar(
+            title: isSession ? "FlowShare – Transfer" : screen == .home ? "FlowShare" : screen == .send ? "FlowShare – Send" : "FlowShare – Receive",
             onMenu: {
-                if screen == .home { openMenu() }
+                if let transfer {
+                    if isTerminal(transfer) { flowShare.dismissSession() }
+                    else { Task { await flowShare.cancelFocusedTransfer() } }
+                } else if flowShare.isBusy {
+                    return
+                } else if screen == .home { openMenu() }
                 else { screen = .home; selectedFiles.removeAll() }
             },
-            leadingIcon: screen == .home ? "line.3.horizontal" : "chevron.left",
+            leadingIcon: transfer != nil ? "xmark" : screen == .home ? "line.3.horizontal" : "chevron.left",
             trailing: AnyView(HStack(spacing: 0) {
-                Button {
-                    if screen == .receive {
-                        Task { await flowShare.createReceiveCode(); showReceiveCode = flowShare.invite != nil }
-                    } else {
-                        screen = .send
+                if !isSession {
+                    Button {
+                        if screen == .receive {
+                            Task { await flowShare.createReceiveCode(); showReceiveCode = flowShare.invite != nil }
+                        } else {
+                            screen = .send
+                        }
+                    } label: {
+                        Image(systemName: screen == .receive ? "qrcode" : "viewfinder")
+                            .font(.system(size: 20, weight: .medium)).frame(width: 42, height: 42)
                     }
-                } label: {
-                    Image(systemName: screen == .receive ? "qrcode" : "viewfinder")
-                        .font(.system(size: 20, weight: .medium)).frame(width: 42, height: 42)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(screen == .receive ? "Show QR code" : "Scan QR code")
-                Button { showHistory = true } label: {
-                    Image(systemName: "clock.arrow.circlepath").font(.system(size: 20, weight: .medium)).frame(width: 42, height: 42)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Transfer history")
-                Menu {
-                    if !selectedFiles.isEmpty { Button("Clear selected files", systemImage: "xmark.circle") { selectedFiles.removeAll() } }
-                    if !flowShare.transfers.isEmpty { Button("Clear transfer history", systemImage: "trash", role: .destructive) { flowShare.clearHistory() } }
-                } label: {
-                    Image(systemName: "ellipsis").font(.system(size: 21, weight: .semibold)).rotationEffect(.degrees(90)).frame(width: 42, height: 42)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(screen == .receive ? "Show QR code" : "Scan QR code")
+                    Button { showHistory = true } label: {
+                        Image(systemName: "clock.arrow.circlepath").font(.system(size: 20, weight: .medium)).frame(width: 42, height: 42)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Transfer history")
+                    Menu {
+                        if !selectedFiles.isEmpty { Button("Clear selected files", systemImage: "xmark.circle") { selectedFiles.removeAll() } }
+                        if !flowShare.transfers.isEmpty { Button("Clear transfer history", systemImage: "trash", role: .destructive) { flowShare.clearHistory() } }
+                    } label: {
+                        Image(systemName: "ellipsis").font(.system(size: 21, weight: .semibold)).rotationEffect(.degrees(90)).frame(width: 42, height: 42)
+                    }
                 }
             })
         )
@@ -278,6 +282,138 @@ struct FlowShareView: View {
         .scrollIndicators(.hidden)
     }
 
+    private var connectingSessionView: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                Text(flowShare.sessionTitle ?? "Establishing secure connection")
+                    .font(.flowTitleLarge)
+                    .multilineTextAlignment(.center)
+
+                FlowCard(content: VStack(spacing: 22) {
+                    HStack(spacing: 16) {
+                        FlowIcon(name: "iphone.gen3", emphasized: true, size: 62)
+                        VStack(spacing: 8) {
+                            ProgressView().controlSize(.large).tint(FlowPalette.action)
+                            Image(systemName: "lock.shield.fill").foregroundStyle(FlowPalette.secondary)
+                        }
+                        FlowIcon(name: "desktopcomputer", emphasized: true, size: 62)
+                    }
+                    Text("Establishing an authenticated direct connection…")
+                        .font(.flowBody).foregroundStyle(FlowPalette.secondary)
+                        .multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity).padding(24)), elevated: true)
+
+                Text("Keep FlowGet open on both devices. The receiver will be asked to accept before file transfer begins.")
+                    .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 20).padding(.top, 36).padding(.bottom, 28)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func transferSessionView(_ transfer: FlowShareTransfer) -> some View {
+        let terminal = ["Completed", "Cancelled", "Rejected", "Failed"].contains(transfer.state)
+        let progress = transfer.totalBytes > 0
+            ? min(1, max(0, Double(transfer.completedBytes) / Double(transfer.totalBytes)))
+            : 0
+        return ScrollView {
+            VStack(spacing: 18) {
+                FlowCard(content: VStack(spacing: 20) {
+                    HStack(spacing: 16) {
+                        FlowIcon(name: transfer.direction == .send ? "iphone.gen3" : "desktopcomputer", emphasized: true, size: 58)
+                        VStack(spacing: 7) {
+                            Image(systemName: transfer.state == "Completed" ? "checkmark.circle.fill" : "lock.shield.fill")
+                                .font(.system(size: 31, weight: .semibold))
+                                .foregroundStyle(transfer.state == "Completed" ? FlowPalette.success : FlowPalette.action)
+                            Text(transfer.state).font(.flowLabel).foregroundStyle(FlowPalette.secondary)
+                        }
+                        FlowIcon(name: transfer.direction == .send ? "desktopcomputer" : "iphone.gen3", emphasized: true, size: 58)
+                    }
+                    Text(transfer.direction == .send ? "Sending securely" : "Receiving securely")
+                        .font(.flowTitleLarge)
+                    Text(transfer.peerName ?? "FlowGet device")
+                        .font(.flowBody).foregroundStyle(FlowPalette.secondary)
+                }.frame(maxWidth: .infinity).padding(22)), elevated: true)
+
+                FlowCard(content: VStack(alignment: .leading, spacing: 13) {
+                    HStack(spacing: 12) {
+                        FlowIcon(name: fileIcon(URL(fileURLWithPath: transfer.fileName)))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(transfer.fileName).font(.flowTitleSmall).lineLimit(2)
+                            Text("\(transfer.completedBytes.fileSize) / \(transfer.totalBytes.fileSize)")
+                                .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+                        }
+                        Spacer()
+                        Text("\(Int(progress * 100))%").font(.flowTitleSmall)
+                    }
+                    FlowProgressBar(value: progress)
+                    HStack {
+                        Text(transfer.state)
+                        Spacer()
+                        if transfer.bytesPerSecond > 0 { Text("\(transfer.bytesPerSecond.fileSize)/s") }
+                    }
+                    .font(.flowLabel).foregroundStyle(FlowPalette.secondary)
+                    if let error = transfer.errorCode, !error.isEmpty {
+                        Text(error).font(.flowCaption).foregroundStyle(FlowPalette.danger)
+                    }
+                }.padding(16)), elevated: !terminal)
+
+                if terminal {
+                    FlowPrimaryButton(title: transfer.state == "Completed" ? "Done" : "Close", icon: "checkmark") {
+                        selectedFiles.removeAll()
+                        friendCode = ""
+                        flowShare.dismissSession()
+                    }
+                } else {
+                    FlowOutlineButton(title: "Cancel transfer", icon: "xmark") {
+                        Task { await flowShare.cancelFocusedTransfer() }
+                    }
+                }
+            }
+            .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 28)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func incomingRequestView(_ request: FlowShareIncomingRequest) -> some View {
+        NavigationStack {
+            VStack(spacing: 22) {
+                Spacer(minLength: 12)
+                Text("Incoming File Request").font(.flowTitleLarge)
+                Text(request.friendTransfer ? "FlowShare Internet · One-time Code" : "FlowShare Device")
+                    .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+
+                FlowCard(content: VStack(spacing: 20) {
+                    HStack(spacing: 16) {
+                        FlowIcon(name: "desktopcomputer", emphasized: true, size: 60)
+                        Image(systemName: "arrow.right").font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(FlowPalette.action)
+                        FlowIcon(name: "iphone.gen3", emphasized: true, size: 60)
+                    }
+                    Text(request.sourceDisplayName).font(.flowTitle)
+                    Divider()
+                    VStack(spacing: 5) {
+                        Text(request.fileName).font(.flowTitleSmall).lineLimit(2)
+                        Text(request.fileSize.fileSize).font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+                    }
+                }.frame(maxWidth: .infinity).padding(22)), elevated: true)
+
+                Spacer()
+                FlowPrimaryButton(title: "Accept & receive", icon: "checkmark") {
+                    screen = .receive
+                    presentedIncoming = nil
+                    Task { await flowShare.accept(request) }
+                }
+                FlowOutlineButton(title: "Decline", icon: "xmark") {
+                    presentedIncoming = nil
+                    Task { await flowShare.reject(request) }
+                }
+            }
+            .padding(20).flowPage()
+        }
+    }
+
     private var historySheet: some View {
         NavigationStack {
             Group {
@@ -372,6 +508,10 @@ struct FlowShareView: View {
         case "android": "smartphone"
         default: "iphone.gen3"
         }
+    }
+
+    private func isTerminal(_ transfer: FlowShareTransfer) -> Bool {
+        ["Completed", "Cancelled", "Rejected", "Failed"].contains(transfer.state)
     }
 
     private func fileIcon(_ url: URL) -> String {
