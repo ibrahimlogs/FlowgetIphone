@@ -10,7 +10,7 @@
 | FTP | — | Not available through Apple's native URLSession stack |
 | Torrent engine | Native-core boundary in add-download UI | Requires an iOS XCFramework build of the authoritative native core |
 | Browser | `WKWebView` browser, history, saved links, response interception, download discovery/handoff | Ported for direct files; segmented HLS/DASH media still needs the native engine |
-| FlowShare screens | Send/receive/nearby, codes, file selection, transfer list | Ported UI; protocol-v3 QUIC requires the authoritative native core XCFramework |
+| FlowShare | `FlowShareCoordinator.swift`, `NativeCoreBridge.swift`, generated UniFFI ABI, pinned vendored Rust core | Integrated for authenticated device and friend-code send/receive over protocol-v3 native QUIC; Apple SDK build/test runs through `verify-on-mac.sh` |
 | Settings | Persistent download/browser/theme settings | Ported |
 | Activity, Schedule, License, About | `MoreViews.swift` | Ported |
 | Android services/Room/DataStore/SAF | background URLSession/JSON/Keychain/document picker | Replaced with iOS-native equivalents |
@@ -18,6 +18,6 @@
 
 ## External contracts required for production parity
 
-The production iPhone app uses its own dedicated `ios` public client; the Android public client remains separate and platform-bound. FlowShare and torrent payload parity also cannot be truthfully recreated as a second Swift protocol: the Android architecture explicitly treats the shared Rust protocol-v3 core as authoritative. Compile that core for iOS as an XCFramework and connect it at the clearly marked FlowShare/torrent UI boundary.
+The production iPhone app uses its own dedicated `ios` public client; the Android public client remains separate and platform-bound. FlowShare consumes an exact pinned snapshot of the same authoritative Rust protocol-v3 core as Android. `build-flowshare-core.sh` compiles it into a local XCFramework for iPhone and simulator and verifies the checked-in generated Swift ABI. Torrent payload parity still needs its separate authoritative native engine rather than a Swift protocol substitute.
 
 No file under `FlowGetAndroid` was changed while creating this project.

@@ -1,0 +1,61 @@
+{
+  "candidate": {
+    "batchDigestHex": "94bf2fd453b16e2a29a3d6a7b6cac62ce78a77cb026df709e2d09c2670069dfa",
+    "canonicalJson": {
+      "address": "192.168.50.7",
+      "addressFamily": "ipv4",
+      "candidateId": "641ad42cd71df3f81e6405cdffea2ea9",
+      "candidateType": "host",
+      "expiresUnixMs": 4102444800000,
+      "foundation": "host-v4-golden",
+      "generation": 3,
+      "networkIdentifier": "golden-lan",
+      "port": 44321,
+      "priority": 2130706431,
+      "relatedAddress": null,
+      "transport": "udp",
+      "version": 1
+    }
+  },
+  "capabilityDigest": {
+    "capabilities": 7,
+    "sha256Hex": "fbcee5db6358dd2398cb40e07285ac29cf29b941e8f29926da9547f4b0ad6073"
+  },
+  "checkpointMac": {
+    "keyHex": "6666666666666666666666666666666666666666666666666666666666666666",
+    "payloadHex": "666c6f776765742d676f6c64656e2d636865636b706f696e742d7633",
+    "tagHex": "c58cb59416c2cbadc963641d43ed967f99cf548ca25972c930d67a8ab6b21c1f"
+  },
+  "rangeHeader": {
+    "encodedHex": "4651524700031111111111111111111111111111111101020304010203040506070811121314151617182122",
+    "input": {
+      "flags": 8482,
+      "length": 1230066625199609624,
+      "offset": 72623859790382856,
+      "rangeId": 16909060,
+      "transferIdHex": "11111111111111111111111111111111"
+    }
+  },
+  "resumeStateDigest": {
+    "bitmapHex": "a503",
+    "sha256Hex": "ab6f3b03466c2d9b981a4f0c39396550c73f9c6686f4bbaae3d3a435e253c2a3",
+    "totalBlocks": 10
+  },
+  "schemaVersion": 1,
+  "secureResumeStateDigest": {
+    "sha256Hex": "d4d2f13cd95e27496a3b39e37707ef28df5200cd1e2c5377d62b02fe9db64c63"
+  },
+  "sessionLineageDigest": {
+    "sessionIdHex": "22222222222222222222222222222222",
+    "sha256Hex": "a6aa0b49c5052343c34ad420849cdbac48bb5f729695c89be7c7097278deb67e"
+  },
+  "transferCommitment": {
+    "blockSize": 2097152,
+    "capabilities": 7,
+    "expectedSha256Hex": "3333333333333333333333333333333333333333333333333333333333333333",
+    "fileSize": 123456789,
+    "sha256Hex": "355ae58eb16b024ad70b4cfc5570dee2758f189782708a268415943baaca1916",
+    "totalBlocks": 59
+  },
+  "wireProtocolVersion": 3
+}

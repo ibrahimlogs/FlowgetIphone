@@ -37,7 +37,16 @@ $requiredFiles = @(
     'FlowGet\BrowserView.swift',
     'FlowGet\GoogleSignInService.swift',
     'FlowGet\LicensingService.swift',
+    'FlowGet\FlowShareCoordinator.swift',
+    'FlowGet\NativeCoreBridge.swift',
+    'FlowGet\Generated\flowget_flowshare_core.swift',
+    'Native\flowshare-core.source',
+    'Native\flowshare-core.Cargo.lock',
+    'Native\Vendor\crates\flowget-flowshare-core\Cargo.toml',
+    'Native\Vendor\crates\flowget-flowshare-core\src\cross_platform.rs',
+    'build-flowshare-core.sh',
     'FlowGetTests\BrowserDownloadTests.swift',
+    'FlowGetTests\FlowShareTests.swift',
     'FlowGetTests\URLInputTests.swift',
     'FlowGetTests\PolicyTests.swift'
 )
@@ -50,6 +59,15 @@ foreach ($relativePath in $requiredFiles) {
 $forbidden = Get-ChildItem -LiteralPath $sourceRoot -Filter '*.swift' |
     Select-String -Pattern 'com\.flowget\.android|H:\\Android\\Projects\\FlowGetAndroid'
 if ($forbidden) { throw 'An Android-only identifier or local Android path leaked into Swift source.' }
+
+$pin = (Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'Native\flowshare-core.source')).Trim()
+if ($pin -notmatch '^[0-9a-f]{40}$') { throw 'FlowShare core source must be pinned to a full Git commit.' }
+if ($project -notmatch 'FlowGetNativeCore\.xcframework') { throw 'The FlowShare XCFramework is not linked in the Xcode project.' }
+
+$flowShareSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'FlowShareCoordinator.swift')
+if ($flowShareSource -notmatch 'validSignalingEndpoint' -or $flowShareSource -notmatch 'sendAckConfirmed') {
+    throw 'FlowShare signaling validation or durable acknowledgement handling is missing.'
+}
 
 $swiftFiles = Get-ChildItem -LiteralPath $sourceRoot -Filter '*.swift'
 $testFiles = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'FlowGetTests') -Filter '*.swift'

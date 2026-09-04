@@ -6,11 +6,14 @@ struct FlowShareView: View {
     private enum Screen: Equatable { case home, send, receive }
 
     @EnvironmentObject private var store: AppStore
+    @ObservedObject var flowShare: FlowShareCoordinator
     @State private var screen: Screen = .home
     @State private var selectedFiles: [URL] = []
+    @State private var selectedDeviceID: String?
     @State private var showFiles = false
     @State private var showHistory = false
-    @State private var showCoreNotice = false
+    @State private var showReceiveCode = false
+    @State private var presentedIncoming: FlowShareIncomingRequest?
     @State private var friendCode = ""
     let openMenu: () -> Void
 
@@ -32,10 +35,33 @@ struct FlowShareView: View {
             if case .success(let urls) = result { selectedFiles = urls }
         }
         .sheet(isPresented: $showHistory) { historySheet.presentationDetents([.medium, .large]).presentationDragIndicator(.visible) }
-        .alert("Native FlowShare core required", isPresented: $showCoreNotice) {
-            Button("OK", role: .cancel) {}
+        .sheet(isPresented: $showReceiveCode) { receiveCodeSheet.presentationDetents([.medium]).presentationDragIndicator(.visible) }
+        .alert("Incoming file", isPresented: Binding(
+            get: { presentedIncoming != nil },
+            set: { if !$0 { presentedIncoming = nil } }
+        ), presenting: presentedIncoming) { request in
+            Button("Decline", role: .destructive) {
+                Task { await flowShare.reject(request) }
+                presentedIncoming = nil
+            }
+            Button("Accept") {
+                Task { await flowShare.accept(request) }
+                presentedIncoming = nil
+            }
+        } message: { request in
+            Text("\(request.sourceDisplayName) wants to send \(request.fileName) (\(request.fileSize.fileSize)).")
+        }
+        .alert("FlowShare", isPresented: Binding(
+            get: { flowShare.errorMessage != nil },
+            set: { if !$0 { flowShare.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { flowShare.errorMessage = nil }
         } message: {
-            Text("This interface is ready. Cross-platform FlowShare protocol-v3 transfer requires the shared FlowGet core compiled as an iOS XCFramework.")
+            Text(flowShare.errorMessage ?? "FlowShare could not complete that action.")
+        }
+        .task { await store.activateFlowShare() }
+        .onReceive(flowShare.$incoming) { requests in
+            if presentedIncoming == nil { presentedIncoming = requests.first }
         }
     }
 
@@ -48,7 +74,13 @@ struct FlowShareView: View {
             },
             leadingIcon: screen == .home ? "line.3.horizontal" : "chevron.left",
             trailing: AnyView(HStack(spacing: 0) {
-                Button { showCoreNotice = true } label: {
+                Button {
+                    if screen == .receive {
+                        Task { await flowShare.createReceiveCode(); showReceiveCode = flowShare.invite != nil }
+                    } else {
+                        screen = .send
+                    }
+                } label: {
                     Image(systemName: screen == .receive ? "qrcode" : "viewfinder")
                         .font(.system(size: 20, weight: .medium)).frame(width: 42, height: 42)
                 }
@@ -61,7 +93,7 @@ struct FlowShareView: View {
                 .accessibilityLabel("Transfer history")
                 Menu {
                     if !selectedFiles.isEmpty { Button("Clear selected files", systemImage: "xmark.circle") { selectedFiles.removeAll() } }
-                    if !store.flowShareTransfers.isEmpty { Button("Clear transfer history", systemImage: "trash", role: .destructive) { store.flowShareTransfers.removeAll() } }
+                    if !flowShare.transfers.isEmpty { Button("Clear transfer history", systemImage: "trash", role: .destructive) { flowShare.clearHistory() } }
                 } label: {
                     Image(systemName: "ellipsis").font(.system(size: 21, weight: .semibold)).rotationEffect(.degrees(90)).frame(width: 42, height: 42)
                 }
@@ -91,7 +123,9 @@ struct FlowShareView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Quick connect").font(.flowTitleSmall).foregroundStyle(FlowPalette.secondary)
                     HStack(spacing: 10) {
-                        compactAction("Scan QR", "viewfinder") { showCoreNotice = true }
+                        compactAction("Receive code", "qrcode") {
+                            Task { await flowShare.createReceiveCode(); showReceiveCode = flowShare.invite != nil }
+                        }
                         compactAction("My Devices", "iphone.gen3") { screen = .send }
                     }
                 }
@@ -102,7 +136,7 @@ struct FlowShareView: View {
                         Image(systemName: "clock.arrow.circlepath")
                         Text("Transfer history").font(.flowTitleSmall)
                         Spacer()
-                        if !store.flowShareTransfers.isEmpty { FlowStatusBadge(title: "\(store.flowShareTransfers.count)", color: FlowPalette.secondary) }
+                        if !flowShare.transfers.isEmpty { FlowStatusBadge(title: "\(flowShare.transfers.count)", color: FlowPalette.secondary) }
                         Image(systemName: "chevron.right").foregroundStyle(FlowPalette.tertiary)
                     }
                     .padding(.horizontal, 15).frame(height: 50)
@@ -155,25 +189,48 @@ struct FlowShareView: View {
                 }
 
                 FlowSectionTitle(title: "Choose destination")
-                FlowCard(content: VStack(spacing: 0) {
-                    destinationRow("Nearby device", "Find FlowGet devices on the same Wi-Fi", "antenna.radiowaves.left.and.right")
-                    Divider().padding(.leading, 68)
-                    destinationRow("My devices", "Send to a linked computer or phone", "desktopcomputer")
-                })
+                if flowShare.devices.isEmpty {
+                    FlowCard(content: HStack(spacing: 14) {
+                        FlowIcon(name: "antenna.radiowaves.left.and.right", emphasized: true, size: 52)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(flowShare.connection.title).font(.flowTitle)
+                            Text("Waiting for your online FlowGet devices")
+                                .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+                        }
+                        Spacer()
+                        if flowShare.connection == .connecting || flowShare.connection == .reconnecting { ProgressView() }
+                    }.padding(14))
+                } else {
+                    FlowCard(content: VStack(spacing: 0) {
+                        ForEach(Array(flowShare.devices.enumerated()), id: \.element.id) { index, device in
+                            destinationRow(device)
+                            if index < flowShare.devices.count - 1 { Divider().padding(.leading, 68) }
+                        }
+                    })
+                }
 
                 FlowSectionTitle(title: "Send with code")
                 HStack(spacing: 10) {
                     Image(systemName: "number").foregroundStyle(FlowPalette.secondary)
                     TextField("Receiver code", text: $friendCode)
                         .font(.flowBody).textInputAutocapitalization(.characters).autocorrectionDisabled()
-                    Button("Connect") { showCoreNotice = true }
-                        .font(.flowTitleSmall).disabled(friendCode.isEmpty)
+                    Button("Connect") {
+                        Task { await flowShare.send(files: selectedFiles, friendCode: friendCode) }
+                    }
+                    .font(.flowTitleSmall).disabled(friendCode.filter { $0.isLetter || $0.isNumber }.count != 12 || selectedFiles.isEmpty || flowShare.isBusy)
                 }
                 .padding(.horizontal, 14).frame(height: 54)
                 .background(FlowPalette.surface).clipShape(RoundedRectangle(cornerRadius: FlowRadius.medium))
                 .overlay(RoundedRectangle(cornerRadius: FlowRadius.medium).stroke(FlowPalette.outline))
 
-                FlowPrimaryButton(title: "Continue", icon: "arrow.right", disabled: selectedFiles.isEmpty) { showCoreNotice = true }
+                FlowPrimaryButton(
+                    title: flowShare.isBusy ? "Preparing…" : "Continue",
+                    icon: "arrow.right",
+                    disabled: selectedFiles.isEmpty || selectedDeviceID == nil || flowShare.isBusy
+                ) {
+                    guard let selectedDeviceID else { return }
+                    Task { await flowShare.send(files: selectedFiles, toDeviceID: selectedDeviceID) }
+                }
             }
             .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 28)
         }
@@ -193,8 +250,10 @@ struct FlowShareView: View {
                     .multilineTextAlignment(.center).padding(.top, 8)
 
                 HStack(spacing: 10) {
-                    capsuleButton("Nearby", "antenna.radiowaves.left.and.right") { showCoreNotice = true }
-                    capsuleOutlineButton("Receive code", "qrcode") { showCoreNotice = true }
+                    capsuleButton("Reconnect", "antenna.radiowaves.left.and.right") { flowShare.reconnectIfNeeded() }
+                    capsuleOutlineButton("Receive code", "qrcode") {
+                        Task { await flowShare.createReceiveCode(); showReceiveCode = flowShare.invite != nil }
+                    }
                 }
                 .padding(.top, 26)
 
@@ -202,10 +261,15 @@ struct FlowShareView: View {
                     FlowIcon(name: "iphone.gen3", emphasized: true, size: 52)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(UIDevice.current.name).font(.flowTitle)
-                        Text("Waiting for compatible devices").font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+                        Text(flowShare.connection == .online ? "Ready for compatible devices" : flowShare.connection.title)
+                            .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
                     }
                     Spacer()
-                    ProgressView().tint(FlowPalette.content)
+                    if flowShare.connection == .online {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        ProgressView().tint(FlowPalette.content)
+                    }
                 }.padding(16), elevated: true)
                 .padding(.top, 24)
             }
@@ -217,11 +281,11 @@ struct FlowShareView: View {
     private var historySheet: some View {
         NavigationStack {
             Group {
-                if store.flowShareTransfers.isEmpty {
+                if flowShare.transfers.isEmpty {
                     ContentUnavailableView("No transfers yet", systemImage: "clock.arrow.circlepath", description: Text("Sent and received files will appear here."))
                 } else {
                     List {
-                        ForEach(store.flowShareTransfers) { transfer in
+                        ForEach(flowShare.transfers) { transfer in
                             HStack(spacing: 12) {
                                 FlowIcon(name: transfer.direction == .send ? "arrow.up" : "arrow.down")
                                 VStack(alignment: .leading, spacing: 3) {
@@ -230,7 +294,6 @@ struct FlowShareView: View {
                                 }
                             }
                         }
-                        .onDelete { store.flowShareTransfers.remove(atOffsets: $0) }
                     }
                     .listStyle(.plain)
                 }
@@ -238,6 +301,27 @@ struct FlowShareView: View {
             .navigationTitle("Transfer history")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showHistory = false } } }
+        }
+    }
+
+    private var receiveCodeSheet: some View {
+        NavigationStack {
+            VStack(spacing: 18) {
+                FlowIcon(name: "qrcode", emphasized: true, size: 70)
+                Text("Receive with code").font(.flowTitleLarge)
+                if let invite = flowShare.invite {
+                    Text(invite.code).font(.system(size: 30, weight: .bold, design: .monospaced))
+                        .textSelection(.enabled)
+                    Text("Share this one-time code. It expires at \(invite.expiresAt.formatted(date: .omitted, time: .shortened)).")
+                        .font(.flowBodySmall).foregroundStyle(FlowPalette.secondary).multilineTextAlignment(.center)
+                } else {
+                    ProgressView("Creating secure code…")
+                }
+            }
+            .padding(28).frame(maxWidth: .infinity, maxHeight: .infinity).flowPage()
+            .navigationTitle("FlowShare")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showReceiveCode = false } } }
         }
     }
 
@@ -266,18 +350,28 @@ struct FlowShareView: View {
         }.buttonStyle(FlowPressButtonStyle())
     }
 
-    private func destinationRow(_ title: String, _ subtitle: String, _ icon: String) -> some View {
-        Button { showCoreNotice = true } label: {
+    private func destinationRow(_ device: FlowShareDevice) -> some View {
+        Button { selectedDeviceID = device.id } label: {
             HStack(spacing: 12) {
-                FlowIcon(name: icon)
+                FlowIcon(name: device.nearby ? "antenna.radiowaves.left.and.right" : platformIcon(device.platform))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.flowTitleSmall)
-                    Text(subtitle).font(.flowCaption).foregroundStyle(FlowPalette.secondary)
+                    Text(device.displayName).font(.flowTitleSmall)
+                    Text(device.nearby ? "Nearby · \(device.platform.capitalized)" : device.platform.capitalized)
+                        .font(.flowCaption).foregroundStyle(FlowPalette.secondary)
                 }
                 Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(FlowPalette.tertiary)
+                Image(systemName: selectedDeviceID == device.id ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selectedDeviceID == device.id ? FlowPalette.content : FlowPalette.tertiary)
             }.padding(14)
         }.buttonStyle(.plain)
+    }
+
+    private func platformIcon(_ platform: String) -> String {
+        switch platform.lowercased() {
+        case "windows", "macos": "desktopcomputer"
+        case "android": "smartphone"
+        default: "iphone.gen3"
+        }
     }
 
     private func fileIcon(_ url: URL) -> String {

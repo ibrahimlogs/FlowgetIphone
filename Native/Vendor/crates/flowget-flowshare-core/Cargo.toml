@@ -1,0 +1,51 @@
+[package]
+name = "flowget-flowshare-core"
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+description = "Portable FlowShare v3 protocol, cryptography, resume, connectivity, and device contracts"
+
+[lib]
+name = "flowget_flowshare_core"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["uniffi-bindings"]
+
+[features]
+default = []
+uniffi-bindings = ["dep:uniffi"]
+
+[dependencies]
+base64 = "0.22"
+crab_nat = "0.7.6"
+dirs = "5.0"
+fs2 = "0.4"
+futures = "0.3"
+get_if_addrs = "0.5"
+hkdf = "0.12"
+hmac = "0.12"
+igd-next = { version = "0.17.1", features = ["aio_tokio"] }
+netdev = { version = "0.45.0", default-features = false, features = ["gateway"] }
+quinn = { version = "0.11", default-features = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.0"
+sha2_compat = { package = "sha2", version = "0.10" }
+socket2 = "0.6"
+subtle = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+uniffi = { version = "0.32", optional = true, features = ["cli"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+serial_test = "3"

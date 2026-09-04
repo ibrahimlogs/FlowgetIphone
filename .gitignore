@@ -3,3 +3,6 @@ build/
 *.xcuserstate
 xcuserdata/
 .DS_Store
+Native/.build/
+Native/FlowGetNativeCore.xcframework/
+Native/Vendor/crates/flowget-flowshare-core/Cargo.lock

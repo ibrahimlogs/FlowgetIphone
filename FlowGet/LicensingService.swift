@@ -71,6 +71,12 @@ struct LicenseSnapshot: Equatable {
     }
 }
 
+struct FlowShareCredentialContext: Sendable {
+    let entitlementJWT: String
+    let accountID: String
+    let globalDeviceID: String
+}
+
 actor LicensingService {
     private let auth: AuthService
     private let session: URLSession
@@ -153,9 +159,12 @@ actor LicensingService {
                 slotIndex: claim.slotIndex,
                 sessionID: opened.sessionID,
                 leaseExpiresAt: opened.leaseExpiresAt,
-                deviceLabel: deviceLabel
+                deviceLabel: deviceLabel,
+                signedEntitlement: opened.signedAssertion,
+                features: []
             )
-            _ = try await verify(opened.signedAssertion, expected: active)
+            let openedClaims = try await verify(opened.signedAssertion, expected: active)
+            active.features = Set(openedClaims.features)
 
             let synced: EntitlementSyncResponse = try await post(
                 "v3/client/entitlement/sync",
@@ -170,6 +179,8 @@ actor LicensingService {
             let claims = try await verify(synced.signedAssertion, expected: active)
             try validate(sync: synced, claims: claims)
             active.leaseExpiresAt = claims.sessionLeaseExpiresAt
+            active.signedEntitlement = synced.signedAssertion
+            active.features = Set(claims.features)
             runtime = active
             return Self.snapshot(from: claims, deviceLabel: deviceLabel)
         } catch WorkerAPIError.policy(let code, let message, _) {
@@ -206,10 +217,14 @@ actor LicensingService {
                 slotIndex: active.slotIndex,
                 sessionID: active.sessionID,
                 leaseExpiresAt: lease.leaseExpiresAt,
-                deviceLabel: active.deviceLabel
+                deviceLabel: active.deviceLabel,
+                signedEntitlement: lease.signedAssertion,
+                features: active.features
             )
             let claims = try await verify(lease.signedAssertion, expected: updated)
-            runtime = updated
+            var verified = updated
+            verified.features = Set(claims.features)
+            runtime = verified
             return Self.snapshot(from: claims, deviceLabel: active.deviceLabel)
         } catch {
             return nil
@@ -228,6 +243,20 @@ actor LicensingService {
     }
 
     func reset() { runtime = nil }
+
+    func flowShareContext() -> FlowShareCredentialContext? {
+        guard let active = runtime,
+              let leaseExpiry = Self.parseDate(active.leaseExpiresAt),
+              leaseExpiry > Date(),
+              active.features.contains("flowshare") || active.features.contains("p2p.global") else {
+            return nil
+        }
+        return FlowShareCredentialContext(
+            entitlementJWT: active.signedEntitlement,
+            accountID: active.accountID,
+            globalDeviceID: active.globalDeviceID
+        )
+    }
 
     private func register(
         account: FlowGetAccount,
@@ -522,6 +551,8 @@ private struct RuntimeSession {
     let sessionID: String
     var leaseExpiresAt: String
     let deviceLabel: String
+    var signedEntitlement: String
+    var features: Set<String>
 }
 
 private enum WorkerAPIError: LocalizedError {
@@ -642,10 +673,11 @@ private struct EntitlementClaims: Decodable {
     let bindingID: String, platform: String, slotFamily: String, slotIndex: Int
     let activeProducts: [String], planByProduct: [String: String], commercialExpiresAtByProduct: [String: String?]
     let trialEndsAt: String?, paidAccess: Bool, trialAccess: Bool, capacities: EntitlementCapacities
+    let features: [String]
     let issuedAt: Int64, expiresAt: Int64, offlineGraceUntil: Int64, sessionID: String
     let sessionLeaseExpiresAt: String, protocolVersion: Int, signingKeyVersion: String
     enum CodingKeys: String, CodingKey {
-        case issuer, audience, platform, capacities
+        case issuer, audience, platform, capacities, features
         case schemaVersion = "schema_version", tokenID = "token_id", accountID = "account_id", globalDeviceID = "global_device_id"
         case bindingID = "binding_id", slotFamily = "slot_family", slotIndex = "slot_index"
         case activeProducts = "active_products", planByProduct = "plan_by_product"

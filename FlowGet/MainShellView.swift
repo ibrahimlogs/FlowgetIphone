@@ -83,7 +83,7 @@ struct MainShellView: View {
     @ViewBuilder private var currentPage: some View {
         switch page {
         case .downloads: DownloadsView(openMenu: showDrawer)
-        case .flowShare: FlowShareView(openMenu: showDrawer)
+        case .flowShare: FlowShareView(flowShare: store.flowShare, openMenu: showDrawer)
         case .browser: BrowserHomeView(openMenu: showDrawer)
         case .settings: SettingsView(onBack: { withAnimation(FlowMotion.standard) { page = .downloads } })
         case .activity: ActivityView(openMenu: showDrawer)

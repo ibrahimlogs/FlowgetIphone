@@ -22,6 +22,9 @@
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>BGTaskSchedulerPermittedIdentifiers</key><array><string>com.flowget.ios.scheduled-downloads</string></array>
     <key>NSLocalNetworkUsageDescription</key><string>FlowGet finds compatible devices on your local network for direct file transfers.</string>
+    <key>NSBonjourServices</key><array><string>_flowget._udp</string></array>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+    <key>UIFileSharingEnabled</key><true/>
     <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
     <key>UIBackgroundModes</key><array><string>fetch</string><string>processing</string></array>
     <key>UIAppFonts</key><array><string>ProductSans-Regular.ttf</string><string>ProductSans-Bold.ttf</string><string>ProductSans-Italic.ttf</string></array>

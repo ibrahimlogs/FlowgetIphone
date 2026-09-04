@@ -23,20 +23,19 @@ final class AppStore: ObservableObject {
             BackgroundScheduler.reschedule(schedules)
         }
     }
-    @Published var flowShareDevices: [FlowShareDevice] = []
-    @Published var flowShareInvite: FlowShareInvite?
-    @Published var flowShareTransfers: [FlowShareTransfer] = []
     @Published var incomingURL: URL?
     @Published var loginError: String?
     @Published var isAuthenticating = false
     @Published var license = LicenseSnapshot.notSynced
     @Published var isRefreshingLicense = false
     let downloads = DownloadManager()
+    let flowShare = FlowShareCoordinator()
     private let auth = AuthService()
     private lazy var licensingService = LicensingService(auth: auth)
     private let googleSignIn = GoogleSignInService()
     private var tokens: AuthTokens?
     private var licenseHeartbeatTask: Task<Void, Never>?
+    private var flowShareRequested = false
 
     init() {
         settings = Persistence.load(AppSettings.self, name: "settings.json", fallback: AppSettings())
@@ -113,9 +112,11 @@ final class AppStore: ObservableObject {
         licenseHeartbeatTask?.cancel(); licenseHeartbeatTask = nil
         tokens = nil; account = nil; session = .signedOut
         license = .notSynced
+        flowShareRequested = false
         KeychainStore.delete(account: "primary")
         googleSignIn.signOut()
         Task {
+            await flowShare.stop()
             if let token {
                 await licensingService.close(accessToken: token)
                 await auth.revoke(token: token)
@@ -143,6 +144,11 @@ final class AppStore: ObservableObject {
                 accessToken: token,
                 deviceLabel: UIDevice.current.name
             )
+            if flowShareRequested, let context = await licensingService.flowShareContext() {
+                await flowShare.activate(context: context)
+            } else if flowShareRequested {
+                await flowShare.stop()
+            }
             startLicenseHeartbeatIfNeeded()
         } catch {
             license = .unavailable(
@@ -150,6 +156,20 @@ final class AppStore: ObservableObject {
                 device: UIDevice.current.name
             )
         }
+    }
+
+    func activateFlowShare() async {
+        flowShareRequested = true
+        if let context = await licensingService.flowShareContext() {
+            await flowShare.activate(context: context)
+            return
+        }
+        await refreshLicensing()
+        guard let context = await licensingService.flowShareContext() else {
+            flowShare.errorMessage = "A verified FlowShare license is required. Refresh licensing and try again."
+            return
+        }
+        await flowShare.activate(context: context)
     }
 
     func addBrowserHistory(title: String, url: URL) {
@@ -197,6 +217,10 @@ final class AppStore: ObservableObject {
                 guard let token = try? await self.validAccessToken() else { continue }
                 if let snapshot = await self.licensingService.heartbeat(accessToken: token) {
                     self.license = snapshot
+                    if self.flowShareRequested,
+                       let context = await self.licensingService.flowShareContext() {
+                        await self.flowShare.activate(context: context)
+                    }
                 }
             }
         }

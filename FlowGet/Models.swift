@@ -107,6 +107,12 @@ struct FlowShareDevice: Identifiable, Codable, Hashable {
     var platform: String
     var online: Bool
     var nearby = false
+    var canSendFile = true
+    var canReceiveFile = false
+    var canReceiveURL = false
+    var receiverBootstrapID: String?
+    var receiverBootstrapPackage: String?
+    var receiverBootstrapExpiresAt: Date?
 }
 
 struct FlowShareInvite: Codable {
@@ -117,13 +123,46 @@ struct FlowShareInvite: Codable {
 
 struct FlowShareTransfer: Identifiable, Codable {
     enum Direction: String, Codable { case send, receive }
-    var id = UUID()
+    var id: String
     var direction: Direction
     var fileName: String
     var totalBytes: Int64
     var completedBytes: Int64 = 0
+    var bytesPerSecond: Int64 = 0
     var state = "Prepared"
     var peerName: String?
+    var errorCode: String?
+    var updatedAt = Date()
+}
+
+enum FlowShareConnectionState: String {
+    case stopped, connecting, online, reconnecting, unauthorized
+
+    var title: String {
+        switch self {
+        case .stopped: "Offline"
+        case .connecting: "Connecting"
+        case .online: "Online"
+        case .reconnecting: "Reconnecting"
+        case .unauthorized: "License required"
+        }
+    }
+}
+
+struct FlowShareIncomingRequest: Identifiable {
+    var id: String { commandID }
+    let commandID: String
+    let sourceDeviceID: String
+    let sourceDisplayName: String
+    let transferID: String
+    let receiverBootstrapID: String
+    let invitationPackage: String
+    let signalingEndpoint: String
+    let fileName: String
+    let fileSize: Int64
+    let fileSHA256: String
+    let expiresAt: Date
+    let friendTransfer: Bool
 }
 
 extension Int64 {
