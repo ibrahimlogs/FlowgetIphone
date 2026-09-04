@@ -94,6 +94,7 @@ final class FlowShareCoordinator: ObservableObject {
     private var socket: URLSessionWebSocketTask?
     private var presenceTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var transferMonitorTasks: [String: Task<Void, Never>] = [:]
     private var active = false
     private var pendingOutgoing: [String: PendingOutgoing] = [:]
     private var earlyAcceptedCommands: Set<String> = []
@@ -142,8 +143,10 @@ final class FlowShareCoordinator: ObservableObject {
         active = false
         presenceTask?.cancel()
         heartbeatTask?.cancel()
+        transferMonitorTasks.values.forEach { $0.cancel() }
         presenceTask = nil
         heartbeatTask = nil
+        transferMonitorTasks.removeAll()
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         registration = nil
@@ -248,11 +251,12 @@ final class FlowShareCoordinator: ObservableObject {
         do {
             focusedTransferID = request.transferID
             sessionTitle = "Receiving from \(request.sourceDisplayName)"
-            _ = try await native.accept(request)
+            handleNative(try await native.accept(request))
             // The receiver listens before acceptance is acknowledged, preventing a fast-sender race.
-            _ = try await native.startReceiver(transferID: request.transferID,
-                                               endpoint: request.signalingEndpoint)
-            _ = try await native.awaitReceiverReady(transferID: request.transferID)
+            monitorTransfer(id: request.transferID, direction: .receive)
+            handleNative(try await native.startReceiver(transferID: request.transferID,
+                                                        endpoint: request.signalingEndpoint))
+            handleNative(try await native.awaitReceiverReady(transferID: request.transferID))
             guard try await sendAckConfirmed(commandID: request.commandID, status: "accepted") else {
                 _ = try? await native.cancel(transferID: request.transferID, direction: .receive)
                 throw FlowShareClientError.timedOut
@@ -504,9 +508,14 @@ final class FlowShareCoordinator: ObservableObject {
         pendingOutgoing.removeValue(forKey: commandID)
         Task { [weak self] in
             guard let self, let native = self.native else { return }
+            self.monitorTransfer(id: pending.transferID, direction: .send)
             do {
-                _ = try await native.startSender(transferID: pending.transferID, endpoint: pending.endpoint)
+                self.handleNative(try await native.startSender(
+                    transferID: pending.transferID,
+                    endpoint: pending.endpoint
+                ))
             } catch {
+                self.stopMonitoringTransfer(pending.transferID)
                 self.startedCommands.remove(commandID)
                 self.markFailed(transferID: pending.transferID, message: Self.message(for: error))
                 await native.releaseStagedSource(for: pending.transferID)
@@ -653,6 +662,7 @@ final class FlowShareCoordinator: ObservableObject {
                fileName: transfers.first(where: { $0.id == status.transferId })?.fileName ?? "FlowGet file",
                peerName: peerByTransfer[status.transferId])
         if status.state == .completed || status.state == .cancelled || status.state == .rejected || status.state == .failed {
+            stopMonitoringTransfer(status.transferId)
             if status.direction == .send { Task { await native?.releaseStagedSource(for: status.transferId) } }
             if !transfers.contains(where: { ["Connecting", "Connected", "Transferring", "Resuming", "Verifying"].contains($0.state) }) {
                 endBackgroundTask()
@@ -666,6 +676,32 @@ final class FlowShareCoordinator: ObservableObject {
            completedAcknowledged.insert(status.transferId).inserted {
             Task { try? await sendAck(commandID: commandID, status: "completed", detail: nil) }
         }
+    }
+
+    private func monitorTransfer(id: String, direction: FlowShareDirection) {
+        guard transferMonitorTasks[id] == nil else { return }
+        transferMonitorTasks[id] = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, let native = self.native else { return }
+                do {
+                    let status = try await native.transferStatus(transferID: id, direction: direction)
+                    self.handleNative(status)
+                    if Self.isTerminal(status.state) { return }
+                } catch {
+                    // Native events may still complete the transfer. A transient
+                    // status-read failure must not cancel a healthy connection.
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
+    private func stopMonitoringTransfer(_ id: String) {
+        transferMonitorTasks.removeValue(forKey: id)?.cancel()
+    }
+
+    private static func isTerminal(_ state: FlowShareTransferState) -> Bool {
+        state == .completed || state == .cancelled || state == .rejected || state == .failed
     }
 
     private func upsert(status: FlowShareTransferStatus, fileName: String, peerName: String?) {

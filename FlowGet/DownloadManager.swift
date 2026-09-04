@@ -1,6 +1,7 @@
 import Foundation
 import UserNotifications
 import Combine
+import WebKit
 
 @MainActor
 final class DownloadManager: NSObject, ObservableObject {
@@ -13,6 +14,23 @@ final class DownloadManager: NSObject, ObservableObject {
     private var idByTask: [Int: UUID] = [:]
     private var requestByID: [UUID: URLRequest] = [:]
     private var progressSample: [UUID: (bytes: Int64, date: Date)] = [:]
+    private struct BrowserDownloadContext {
+        let id: UUID
+        let sourceURL: URL
+        var destination: URL?
+        var suggestedName: String
+        var mimeType: String?
+
+        init(id: UUID, sourceURL: URL, suggestedName: String) {
+            self.id = id
+            self.sourceURL = sourceURL
+            self.suggestedName = suggestedName
+        }
+    }
+    private var browserDownloads: [ObjectIdentifier: WKDownload] = [:]
+    private var browserWebViews: [ObjectIdentifier: WKWebView] = [:]
+    private var browserDownloadContexts: [ObjectIdentifier: BrowserDownloadContext] = [:]
+    private var browserProgressObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.background(withIdentifier: "com.flowget.ios.downloads")
         config.isDiscretionary = false
@@ -73,6 +91,37 @@ final class DownloadManager: NSObject, ObservableObject {
         onActivity?(ActivityItem(title: "Browser download started", detail: item.title, kind: .download))
     }
 
+    func adoptBrowserDownload(_ download: WKDownload, sourceURL: URL, webView: WKWebView) {
+        let key = ObjectIdentifier(download)
+        guard browserDownloads[key] == nil else { return }
+        let id = UUID()
+        let title = sourceURL.lastPathComponent.nonEmpty ?? sourceURL.host ?? "Browser download"
+        browserDownloads[key] = download
+        browserWebViews[key] = webView
+        browserDownloadContexts[key] = BrowserDownloadContext(
+            id: id,
+            sourceURL: sourceURL,
+            suggestedName: title
+        )
+        beginBrowserDownload(id: id, sourceURL: sourceURL, title: title)
+        download.delegate = self
+        browserProgressObservations[key] = download.progress.observe(
+            \.fractionCompleted,
+            options: [.new]
+        ) { [weak self, weak download] progress, _ in
+            DispatchQueue.main.async {
+                guard let self, let download,
+                      let active = self.browserDownloadContexts[ObjectIdentifier(download)] else { return }
+                let total = progress.totalUnitCount > 0 ? progress.totalUnitCount : nil
+                self.updateBrowserDownload(
+                    id: active.id,
+                    completedBytes: progress.completedUnitCount,
+                    totalBytes: total
+                )
+            }
+        }
+    }
+
     func completeBrowserDownload(id: UUID, temporaryURL: URL, suggestedName: String, mimeType: String?) {
         defer { progressSample[id] = nil }
         guard let index = items.firstIndex(where: { $0.id == id }) else {
@@ -96,6 +145,7 @@ final class DownloadManager: NSObject, ObservableObject {
             items[index].mimeType = mimeType
             items[index].downloadedBytes = Int64(diskSize)
             items[index].totalBytes = Int64(diskSize)
+            items[index].speedBytesPerSecond = 0
             items[index].errorMessage = nil
             onActivity?(ActivityItem(title: "Download completed", detail: items[index].title, kind: .download))
         } catch {
@@ -189,6 +239,10 @@ final class DownloadManager: NSObject, ObservableObject {
 
     func remove(_ id: UUID) {
         taskByID[id]?.cancel()
+        if let key = browserDownloadContexts.first(where: { $0.value.id == id })?.key {
+            browserDownloads[key]?.cancel(nil)
+            releaseBrowserDownload(key)
+        }
         if let item = items.first(where: { $0.id == id }), let file = item.localFileName {
             try? FileManager.default.removeItem(at: Self.downloadFolder.appendingPathComponent(file))
         }
@@ -294,18 +348,51 @@ extension DownloadManager: URLSessionDownloadDelegate {
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                didFinishDownloadingTo location: URL) {
         let taskID = downloadTask.taskIdentifier
+        let rawID = downloadTask.taskDescription
         let suggested = downloadTask.response?.suggestedFilename
-        Task { @MainActor in
-            guard let id = self.idByTask[taskID] ?? downloadTask.taskDescription.flatMap(UUID.init(uuidString:)),
-                  let index = self.items.firstIndex(where: { $0.id == id }) else { return }
-            if let response = downloadTask.response as? HTTPURLResponse,
-               !(200..<300).contains(response.statusCode) {
+        let mimeType = downloadTask.response?.mimeType
+        if let response = downloadTask.response as? HTTPURLResponse,
+           !(200..<300).contains(response.statusCode) {
+            let statusCode = response.statusCode
+            Task { @MainActor in
+                guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
+                      let index = self.items.firstIndex(where: { $0.id == id }) else { return }
                 self.items[index].status = .failed
                 self.items[index].speedBytesPerSecond = 0
-                self.items[index].errorMessage = "The server rejected the download (HTTP \(response.statusCode))."
+                self.items[index].errorMessage = "The server rejected the download (HTTP \(statusCode))."
                 self.requestByID[id] = nil
                 self.persist()
                 self.finishTask(id)
+            }
+            return
+        }
+
+        // URLSession owns `location` only for the duration of this delegate
+        // callback. Move it synchronously to an app-controlled staging path
+        // before hopping to MainActor, otherwise a 100% download can fail when
+        // the system removes its temporary file as this method returns.
+        let stagedLocation: URL
+        do {
+            stagedLocation = try Self.stageTemporaryDownload(location)
+        } catch {
+            let message = error.localizedDescription
+            Task { @MainActor in
+                guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
+                      let index = self.items.firstIndex(where: { $0.id == id }) else { return }
+                self.items[index].status = .failed
+                self.items[index].speedBytesPerSecond = 0
+                self.items[index].errorMessage = message
+                self.requestByID[id] = nil
+                self.persist()
+                self.finishTask(id)
+            }
+            return
+        }
+
+        Task { @MainActor in
+            guard let id = self.idByTask[taskID] ?? rawID.flatMap(UUID.init(uuidString:)),
+                  let index = self.items.firstIndex(where: { $0.id == id }) else {
+                try? FileManager.default.removeItem(at: stagedLocation)
                 return
             }
             let safeName = Self.safeFileName(suggested?.nonEmpty ?? self.items[index].title)
@@ -313,15 +400,16 @@ extension DownloadManager: URLSessionDownloadDelegate {
             let destination = Self.downloadFolder.appendingPathComponent(uniqueName)
             do {
                 try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.moveItem(at: location, to: destination)
+                try FileManager.default.moveItem(at: stagedLocation, to: destination)
                 self.items[index].status = .completed
                 self.items[index].completedAt = Date()
                 self.items[index].localFileName = uniqueName
-                self.items[index].mimeType = downloadTask.response?.mimeType
+                self.items[index].mimeType = mimeType
                 self.requestByID[id] = nil
                 try? FileManager.default.removeItem(at: Self.resumeFolder.appendingPathComponent("\(id.uuidString).resume"))
                 let diskSize = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize
                 self.items[index].downloadedBytes = self.items[index].totalBytes ?? diskSize.map(Int64.init) ?? 0
+                self.items[index].speedBytesPerSecond = 0
                 self.onActivity?(ActivityItem(title: "Download completed", detail: self.items[index].title, kind: .download))
                 let content = UNMutableNotificationContent()
                 content.title = "Download completed"
@@ -331,6 +419,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             } catch {
                 self.items[index].status = .failed
                 self.items[index].errorMessage = Self.userFacingMessage(for: error)
+                try? FileManager.default.removeItem(at: stagedLocation)
             }
             self.requestByID[id] = nil
             self.persist()
@@ -372,6 +461,87 @@ extension DownloadManager: URLSessionDownloadDelegate {
             FlowGetAppDelegate.backgroundSessionCompletion?()
             FlowGetAppDelegate.backgroundSessionCompletion = nil
         }
+    }
+}
+
+extension DownloadManager: WKDownloadDelegate {
+    func download(_ download: WKDownload,
+                  decideDestinationUsing response: URLResponse,
+                  suggestedFilename: String,
+                  completionHandler: @escaping (URL?) -> Void) {
+        let key = ObjectIdentifier(download)
+        guard var active = browserDownloadContexts[key] else {
+            completionHandler(nil)
+            return
+        }
+        let safeName = Self.safeFileName(suggestedFilename)
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowGetWebDownloads", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let destination = folder.appendingPathComponent("\(active.id.uuidString)-\(safeName)")
+            try? FileManager.default.removeItem(at: destination)
+            active.destination = destination
+            active.suggestedName = safeName
+            active.mimeType = response.mimeType
+            browserDownloadContexts[key] = active
+            if let index = items.firstIndex(where: { $0.id == active.id }) {
+                items[index].title = safeName
+                items[index].mimeType = response.mimeType
+                persist()
+            }
+            completionHandler(destination)
+        } catch {
+            releaseBrowserDownload(key)
+            failBrowserDownload(id: active.id, message: Self.userFacingMessage(for: error))
+            completionHandler(nil)
+        }
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        let key = ObjectIdentifier(download)
+        guard let active = browserDownloadContexts[key],
+              let destination = active.destination else {
+            releaseBrowserDownload(key)
+            return
+        }
+        releaseBrowserDownload(key, removeDestination: false)
+        completeBrowserDownload(
+            id: active.id,
+            temporaryURL: destination,
+            suggestedName: active.suggestedName,
+            mimeType: active.mimeType
+        )
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        let key = ObjectIdentifier(download)
+        let active = browserDownloadContexts[key]
+        releaseBrowserDownload(key)
+        failBrowserDownload(id: active?.id, message: Self.userFacingMessage(for: error))
+    }
+
+    private func releaseBrowserDownload(_ key: ObjectIdentifier, removeDestination: Bool = true) {
+        browserProgressObservations.removeValue(forKey: key)?.invalidate()
+        browserDownloads.removeValue(forKey: key)
+        browserWebViews.removeValue(forKey: key)
+        if let active = browserDownloadContexts.removeValue(forKey: key),
+           removeDestination,
+           let destination = active.destination {
+            try? FileManager.default.removeItem(at: destination)
+        }
+    }
+}
+
+extension DownloadManager {
+    nonisolated static func stageTemporaryDownload(_ location: URL) throws -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FlowGetURLSessionStaging", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let staged = folder.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.removeItem(at: staged)
+        try FileManager.default.moveItem(at: location, to: staged)
+        return staged
     }
 }
 

@@ -4,16 +4,15 @@ import UniformTypeIdentifiers
 
 struct DownloadsView: View {
     @EnvironmentObject private var store: AppStore
+    @ObservedObject var manager: DownloadManager
     @State private var filter = 0
     @State private var search = ""
     @State private var showSearch = false
     @State private var showAdd = false
     @State private var showDesktopNotice = false
     @State private var showClearConfirmation = false
-    @State private var itemsVersion = 0
 
     let openMenu: () -> Void
-    private var manager: DownloadManager { store.downloads }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -62,7 +61,6 @@ struct DownloadsView: View {
         } message: {
             Text("Download records and their local files will be removed.")
         }
-        .onReceive(manager.$items) { _ in itemsVersion &+= 1 }
     }
 
     private var titleBar: some View {

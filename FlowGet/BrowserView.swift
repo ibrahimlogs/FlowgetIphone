@@ -388,20 +388,10 @@ struct BrowserPage: View {
 
     private func handleWebDownload(_ event: BrowserDownloadEvent) {
         switch event {
-        case .started(let id, let sourceURL, let title):
-            store.downloads.beginBrowserDownload(id: id, sourceURL: sourceURL, title: title)
+        case .received(let download, let sourceURL, let webView):
+            store.downloads.adoptBrowserDownload(download, sourceURL: sourceURL, webView: webView)
             downloadFeedback = "Download started. You can follow its progress from Downloads."
-        case .progress(let id, let completed, let total):
-            store.downloads.updateBrowserDownload(id: id, completedBytes: completed, totalBytes: total)
-        case .finished(let id, let fileURL, let title, let mimeType):
-            store.downloads.completeBrowserDownload(id: id,
-                                                    temporaryURL: fileURL,
-                                                    suggestedName: title,
-                                                    mimeType: mimeType)
-            downloadFeedback = "Download completed and saved to On My iPhone/FlowGet."
-            showDownloadFeedback = true
-        case .failed(let id, let message):
-            store.downloads.failBrowserDownload(id: id, message: message)
+        case .failed(let message):
             downloadFeedback = message
             showDownloadFeedback = true
         }
@@ -409,10 +399,8 @@ struct BrowserPage: View {
 }
 
 enum BrowserDownloadEvent {
-    case started(id: UUID, sourceURL: URL, title: String)
-    case progress(id: UUID, completedBytes: Int64, totalBytes: Int64?)
-    case finished(id: UUID, fileURL: URL, title: String, mimeType: String?)
-    case failed(id: UUID?, message: String)
+    case received(download: WKDownload, sourceURL: URL, webView: WKWebView)
+    case failed(message: String)
 }
 
 struct BrowserDownloadRequest: Identifiable {
@@ -466,26 +454,10 @@ struct WebContainer: UIViewRepresentable {
         return "[{\"trigger\":{\"url-filter\":\".*\",\"if-domain\":[\(domains)]},\"action\":{\"type\":\"block\"}}]"
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
-        private struct ActiveDownload {
-            let id: UUID
-            let sourceURL: URL
-            var destination: URL?
-            var suggestedName: String?
-            var mimeType: String?
-            var announced = false
-
-            init(id: UUID, sourceURL: URL) {
-                self.id = id
-                self.sourceURL = sourceURL
-            }
-        }
-
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var parent: WebContainer
         var observations: [NSKeyValueObservation] = []
         private var startedRequestedDownloadIDs: Set<UUID> = []
-        private var activeDownloads: [ObjectIdentifier: ActiveDownload] = [:]
-        private var downloadProgressObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
         init(_ parent: WebContainer) { self.parent = parent }
         func observe(_ webView: WKWebView) {
             observations = [
@@ -530,11 +502,11 @@ struct WebContainer: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
-            attach(download, fallbackURL: navigationAction.request.url ?? webView.url)
+            attach(download, fallbackURL: navigationAction.request.url ?? webView.url, webView: webView)
         }
 
         func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-            attach(download, fallbackURL: navigationResponse.response.url ?? webView.url)
+            attach(download, fallbackURL: navigationResponse.response.url ?? webView.url, webView: webView)
         }
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -546,87 +518,17 @@ struct WebContainer: UIViewRepresentable {
         fileprivate func start(_ requestedDownload: BrowserDownloadRequest, in webView: WKWebView) {
             guard startedRequestedDownloadIDs.insert(requestedDownload.id).inserted else { return }
             webView.startDownload(using: requestedDownload.request) { [weak self] download in
-                self?.attach(download, fallbackURL: requestedDownload.request.url)
+                self?.attach(download, fallbackURL: requestedDownload.request.url, webView: webView)
             }
         }
 
-        fileprivate func attach(_ download: WKDownload, fallbackURL: URL?) {
+        fileprivate func attach(_ download: WKDownload, fallbackURL: URL?, webView: WKWebView) {
             guard let sourceURL = download.originalRequest?.url ?? fallbackURL else {
-                parent.onWebDownloadEvent(.failed(id: nil, message: "The website did not provide a valid download URL."))
+                parent.onWebDownloadEvent(.failed(message: "The website did not provide a valid download URL."))
                 download.cancel(nil)
                 return
             }
-            let key = ObjectIdentifier(download)
-            activeDownloads[key] = ActiveDownload(id: UUID(), sourceURL: sourceURL)
-            download.delegate = self
-            downloadProgressObservations[key] = download.progress.observe(\.fractionCompleted, options: [.new]) { [weak self, weak download] progress, _ in
-                DispatchQueue.main.async {
-                    guard let self, let download else { return }
-                    let key = ObjectIdentifier(download)
-                    guard let active = self.activeDownloads[key], active.announced else { return }
-                    let total = progress.totalUnitCount > 0 ? progress.totalUnitCount : nil
-                    self.parent.onWebDownloadEvent(.progress(
-                        id: active.id,
-                        completedBytes: progress.completedUnitCount,
-                        totalBytes: total
-                    ))
-                }
-            }
-        }
-
-        func download(_ download: WKDownload,
-                      decideDestinationUsing response: URLResponse,
-                      suggestedFilename: String,
-                      completionHandler: @escaping (URL?) -> Void) {
-            let key = ObjectIdentifier(download)
-            guard var active = activeDownloads[key] else { completionHandler(nil); return }
-            let safeName = Self.safeFileName(suggestedFilename)
-            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("FlowGetWebDownloads", isDirectory: true)
-            do {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                let destination = folder.appendingPathComponent("\(active.id.uuidString)-\(safeName)")
-                try? FileManager.default.removeItem(at: destination)
-                active.destination = destination
-                active.suggestedName = safeName
-                active.mimeType = response.mimeType
-                active.announced = true
-                activeDownloads[key] = active
-                parent.onWebDownloadEvent(.started(id: active.id, sourceURL: active.sourceURL, title: safeName))
-                completionHandler(destination)
-            } catch {
-                activeDownloads.removeValue(forKey: key)
-                downloadProgressObservations.removeValue(forKey: key)
-                parent.onWebDownloadEvent(.failed(id: nil, message: error.localizedDescription))
-                completionHandler(nil)
-            }
-        }
-
-        func downloadDidFinish(_ download: WKDownload) {
-            let key = ObjectIdentifier(download)
-            downloadProgressObservations.removeValue(forKey: key)
-            guard let active = activeDownloads.removeValue(forKey: key),
-                  let destination = active.destination,
-                  let name = active.suggestedName else { return }
-            parent.onWebDownloadEvent(.finished(id: active.id,
-                                                fileURL: destination,
-                                                title: name,
-                                                mimeType: active.mimeType))
-        }
-
-        func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-            let key = ObjectIdentifier(download)
-            downloadProgressObservations.removeValue(forKey: key)
-            let active = activeDownloads.removeValue(forKey: key)
-            if let destination = active?.destination { try? FileManager.default.removeItem(at: destination) }
-            parent.onWebDownloadEvent(.failed(id: active?.announced == true ? active?.id : nil,
-                                              message: error.localizedDescription))
-        }
-
-        private static func safeFileName(_ value: String) -> String {
-            let invalid = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/\\:"))
-            let cleaned = value.unicodeScalars.map { invalid.contains($0) ? "-" : String($0) }.joined()
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return String((cleaned.isEmpty ? "download" : cleaned).prefix(180))
+            parent.onWebDownloadEvent(.received(download: download, sourceURL: sourceURL, webView: webView))
         }
     }
 }

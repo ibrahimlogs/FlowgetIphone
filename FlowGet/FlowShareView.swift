@@ -317,6 +317,8 @@ struct FlowShareView: View {
         let progress = transfer.totalBytes > 0
             ? min(1, max(0, Double(transfer.completedBytes) / Double(transfer.totalBytes)))
             : 0
+        let remainingBytes = max(0, transfer.totalBytes - transfer.completedBytes)
+        let etaSeconds = transfer.bytesPerSecond > 0 ? remainingBytes / transfer.bytesPerSecond : 0
         return ScrollView {
             VStack(spacing: 18) {
                 FlowCard(content: VStack(spacing: 20) {
@@ -326,7 +328,8 @@ struct FlowShareView: View {
                             Image(systemName: transfer.state == "Completed" ? "checkmark.circle.fill" : "lock.shield.fill")
                                 .font(.system(size: 31, weight: .semibold))
                                 .foregroundStyle(transfer.state == "Completed" ? FlowPalette.success : FlowPalette.action)
-                            Text(transfer.state).font(.flowLabel).foregroundStyle(FlowPalette.secondary)
+                            Text(connectionLabel(for: transfer))
+                                .font(.flowLabel).foregroundStyle(FlowPalette.secondary)
                         }
                         FlowIcon(name: transfer.direction == .send ? "desktopcomputer" : "iphone.gen3", emphasized: true, size: 58)
                     }
@@ -348,12 +351,18 @@ struct FlowShareView: View {
                         Text("\(Int(progress * 100))%").font(.flowTitleSmall)
                     }
                     FlowProgressBar(value: progress)
-                    HStack {
-                        Text(transfer.state)
-                        Spacer()
-                        if transfer.bytesPerSecond > 0 { Text("\(transfer.bytesPerSecond.fileSize)/s") }
+                    HStack(spacing: 0) {
+                        transferMetric(icon: "doc", value: transfer.state == "Completed" ? "1/1" : "0/1", label: "Items")
+                        Divider().frame(height: 40)
+                        transferMetric(icon: "folder", value: transfer.totalBytes.fileSize, label: "Size")
+                        Divider().frame(height: 40)
+                        transferMetric(icon: "gauge.with.dots.needle.67percent", value: "\(transfer.bytesPerSecond.fileSize)/s", label: "Speed")
+                        Divider().frame(height: 40)
+                        transferMetric(icon: "clock", value: etaText(etaSeconds), label: "ETA")
                     }
-                    .font(.flowLabel).foregroundStyle(FlowPalette.secondary)
+                    .padding(.vertical, 9)
+                    .background(FlowPalette.inset)
+                    .clipShape(RoundedRectangle(cornerRadius: FlowRadius.medium, style: .continuous))
                     if let error = transfer.errorCode, !error.isEmpty {
                         Text(error).font(.flowCaption).foregroundStyle(FlowPalette.danger)
                     }
@@ -512,6 +521,41 @@ struct FlowShareView: View {
 
     private func isTerminal(_ transfer: FlowShareTransfer) -> Bool {
         ["Completed", "Cancelled", "Rejected", "Failed"].contains(transfer.state)
+    }
+
+    private func connectionLabel(for transfer: FlowShareTransfer) -> String {
+        switch transfer.state {
+        case "Prepared", "Incoming", "Awaiting acceptance", "Waiting for peer", "Connecting":
+            return "Connecting"
+        case "Connected", "Transferring", "Resuming", "Verifying":
+            return "Connected"
+        default:
+            return transfer.state
+        }
+    }
+
+    private func transferMetric(icon: String, value: String, label: String) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(FlowPalette.secondary)
+            Text(value)
+                .font(.flowLabelSmall.weight(.bold))
+                .foregroundStyle(FlowPalette.content)
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(FlowPalette.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func etaText(_ seconds: Int64) -> String {
+        guard seconds > 0 else { return "--" }
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3_600 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds / 3_600)h \((seconds % 3_600) / 60)m"
     }
 
     private func fileIcon(_ url: URL) -> String {

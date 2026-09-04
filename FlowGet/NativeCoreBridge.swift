@@ -122,6 +122,13 @@ actor NativeCoreBridge {
         try await engine.startReceiver(request: startRequest(transferID: transferID, endpoint: endpoint))
     }
 
+    func transferStatus(transferID: String, direction: FlowShareDirection) async throws -> FlowShareTransferStatus {
+        try await engine.getTransferStatus(request: TransferLookupRequest(
+            transferId: transferID,
+            direction: direction
+        ))
+    }
+
     func awaitReceiverReady(transferID: String, timeoutSeconds: TimeInterval = 15) async throws -> FlowShareTransferStatus {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {

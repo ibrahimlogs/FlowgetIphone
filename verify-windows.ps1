@@ -77,7 +77,10 @@ if ($flowShareSource -notmatch 'validSignalingEndpoint' -or
 }
 
 $browserSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'BrowserView.swift')
-if ($browserSource -notmatch 'WKDownloadDelegate' -or $browserSource -notmatch 'startDownload') {
+$downloadManagerSource = Get-Content -Raw -LiteralPath (Join-Path $sourceRoot 'DownloadManager.swift')
+if ($browserSource -notmatch 'startDownload' -or
+    $downloadManagerSource -notmatch 'WKDownloadDelegate' -or
+    $downloadManagerSource -notmatch 'stageTemporaryDownload') {
     throw 'Native authenticated WebKit download handling is missing.'
 }
 

@@ -40,4 +40,17 @@ final class BrowserDownloadTests: XCTestCase {
         XCTAssertTrue(request.value(forHTTPHeaderField: "User-Agent")?.contains("FlowGet/") == true)
         XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalCacheData)
     }
+
+    func testURLSessionTemporaryFileIsSecuredBeforeDelegateReturns() throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flowget-test-\(UUID().uuidString)")
+        let payload = Data("FlowGet".utf8)
+        try payload.write(to: source)
+
+        let staged = try DownloadManager.stageTemporaryDownload(source)
+        defer { try? FileManager.default.removeItem(at: staged) }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(try Data(contentsOf: staged), payload)
+    }
 }
